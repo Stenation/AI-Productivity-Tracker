@@ -1,0 +1,120 @@
+# Posture Platform configuration (ARCHITECTURE.MD §9, SPEC.MD §7)
+
+server:
+  host: "127.0.0.1"
+  port: 8000
+
+database:
+  path: "~/.local/share/posture-platform/posture.db"
+  wal_mode: true
+
+enabled_modules:
+  inputs: []
+  # - manual_control
+  # - hyprland_ipc
+  # - google_calendar
+  # - s24_webhook
+  # - swalk_ble
+  # - webcam_pose
+
+  policies: []
+  # - posture_policy
+  # - pomodoro_policy
+  # - meeting_policy
+  # - focus_policy
+
+  outputs: []
+  # - waybar_status
+  # - desktop_notify
+  # - tts_piper
+  # - phone_bridge
+  # - calendar_writer
+  # - llm_ollama
+
+privacy:
+  global_pause: false
+  dnd_mode: false
+  hyprland_ipc_mode: "observe_only"  # observe_only | notify_on_distraction
+  allow_webcam: false
+  microphone_mode: "push_to_talk"  # push_to_talk | disabled
+  allow_screenshots: false
+  allow_vlm_screenshots: false
+  allow_roast_mode: false
+  allow_tts: false
+  allow_calendar_writes: false
+  allow_phone_webhook: false
+  allow_external_notifications: false
+  dashboard_bind_local_only: true
+  retention_days: 90
+
+posture:
+  manual_override_ttl_minutes: 30
+  max_sitting_minutes: 50
+  max_walking_minutes: 45
+  pre_meeting_warning_minutes: 10
+  recommendation_cooldown_minutes: 30
+  sensor_consensus_samples: 4
+  sensor_consensus_window_samples: 5
+
+pomodoro:
+  deep_work: "50_10"
+  coding: "50_10"
+  reading: "50_10"
+  admin: "25_5"
+  email: "25_5"
+  planning: "25_5"
+  meeting: null
+  break: null
+  unknown: null
+  auto_start: false
+  recommendation_cooldown_minutes: 30
+
+focus:
+  distraction_grace_seconds: 180
+  phone_unlock_limit_seconds: 60
+  max_prompts_per_hour: 4
+  recommendation_cooldown_minutes: 15
+  work_app_classes:
+    - "code"
+    - "Alacritty"
+    - "kitty"
+    - "obsidian"
+    - "Zotero"
+  distraction_title_patterns:
+    - "YouTube"
+    - "Reddit"
+    - "Twitch"
+    - "Twitter"
+    - "X"
+
+google_calendar:
+  calendar_id: "primary"
+  sync_interval_minutes: 15
+  oauth_token_path: "~/.local/share/posture-platform/google-token.json"
+  read_only: true
+
+webcam:
+  enabled: false
+  device: "/dev/video0"
+  width: 320
+  height: 240
+  sample_interval_seconds: 5
+  walking_burst_frames: 8
+  walking_burst_interval_seconds: 1.5
+
+swalk_ble:
+  enabled: false
+  device_name: "sWalk"
+  scan_timeout_seconds: 10
+
+phone_bridge:
+  transport: "none"  # none | kdeconnect | ntfy | webhook
+  endpoint: ""
+
+llm:
+  provider: "ollama"
+  base_url: "http://127.0.0.1:11434"
+  text_model: "qwen2.5:3b"
+  vision_model: "qwen2.5vl:7b"
+  keep_alive_minutes: 15
+
