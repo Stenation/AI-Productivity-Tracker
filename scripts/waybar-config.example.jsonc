@@ -1,0 +1,15 @@
+// Example Waybar custom module configuration for Posture Platform (ARCHITECTURE.MD §10)
+// Merge "custom/posture" into ~/.config/waybar/config.jsonc and add "custom/posture"
+// to modules-left, modules-center, or modules-right.
+{
+  "custom/posture": {
+    "exec": "/home/steff/Projects/jarvis/scripts/posture-status.py",
+    "return-type": "json",
+    "signal": 8,
+    "interval": 0,
+    "tooltip": true,
+    "on-click": "curl -fsS -X POST http://127.0.0.1:8000/api/activity/cycle >/dev/null",
+    "on-click-right": "xdg-open http://127.0.0.1:8000",
+    "on-click-middle": "curl -fsS -X POST http://127.0.0.1:8000/api/recommendations/snooze >/dev/null"
+  }
+}
