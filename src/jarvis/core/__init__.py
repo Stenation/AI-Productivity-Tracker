@@ -1,7 +1,30 @@
 """Core infrastructure for the Posture Platform."""
 
+from jarvis.core.app import create_app
+from jarvis.core.bus import EventBus
 from jarvis.core.database import Database
 from jarvis.core.migrations import apply_migrations, get_applied_migrations, run_migrations
+from jarvis.core.registry import ModuleRegistry
+from jarvis.core.resolver import StateResolver
+from jarvis.core.schema import (
+    MANUAL_ACTIVITY_CYCLE,
+    ActivitySpan,
+    ActivityState,
+    CalendarEvent,
+    EffectiveActivityState,
+    EventType,
+    FocusState,
+    ManualActivityState,
+    ModuleHealth,
+    PlatformEvent,
+    Recommendation,
+    RecommendationStatus,
+    SystemStateSnapshot,
+    TaskType,
+    TimerSpan,
+    ensure_aware,
+    now_local,
+)
 from jarvis.core.settings import (
     DEFAULT_CONFIG_PATH,
     DEFAULT_MIGRATIONS_DIR,
@@ -12,11 +35,31 @@ from jarvis.core.settings import (
 __all__ = [
     "DEFAULT_CONFIG_PATH",
     "DEFAULT_MIGRATIONS_DIR",
+    "MANUAL_ACTIVITY_CYCLE",
+    "ActivitySpan",
+    "ActivityState",
+    "CalendarEvent",
     "Database",
+    "EffectiveActivityState",
+    "EventBus",
+    "EventType",
+    "FocusState",
+    "ManualActivityState",
+    "ModuleHealth",
+    "ModuleRegistry",
+    "PlatformEvent",
+    "Recommendation",
+    "RecommendationStatus",
     "Settings",
+    "StateResolver",
+    "SystemStateSnapshot",
+    "TaskType",
+    "TimerSpan",
     "apply_migrations",
+    "create_app",
+    "ensure_aware",
     "get_applied_migrations",
     "load_settings",
+    "now_local",
     "run_migrations",
 ]
-
