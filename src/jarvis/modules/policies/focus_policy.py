@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import Any, Literal
 
 from jarvis.core.bus import EventBus
+from jarvis.core.classification import classify_window, is_call_window
 from jarvis.core.database import Database
 from jarvis.core.schema import FocusState, PlatformEvent, ensure_aware, now_local
 from jarvis.modules.base import BaseModule
@@ -100,9 +101,24 @@ def classify_focus_context(
         return ("distracted", "title_pattern")
 
     if calendar_task_type:
-        mapped = DEFAULT_CALENDAR_TASK_FOCUS_MAP.get(calendar_task_type.strip().lower())
+        norm_task = calendar_task_type.strip().lower()
+        mapped = DEFAULT_CALENDAR_TASK_FOCUS_MAP.get(norm_task)
         if mapped is not None:
             return (mapped, "calendar_task")
+
+        # Richer calendar task-type correlation (e.g. docs during coding/reading)
+        correlated = classify_window(
+            clean_class,
+            clean_title,
+            active_task_type=norm_task,
+            work_app_classes=work_app_classes,
+            distraction_title_patterns=distraction_title_patterns,
+        )
+        if (
+            correlated.category != "unknown"
+            and correlated.classifier == "calendar_correlation"
+        ):
+            return (correlated.category, "calendar_correlation")
 
     return ("unknown", "default")
 
@@ -132,6 +148,7 @@ class FocusPolicyModule(BaseModule):
         self._window_title: str | None = None
         self._classifier: str | None = None
         self._window_started_at: datetime | None = None
+        self._is_call_window: bool = False
 
         self._idle: bool = False
         self._idle_since: datetime | None = None
@@ -166,6 +183,15 @@ class FocusPolicyModule(BaseModule):
                     self._window_title = str(cur_win.get("window_title") or "")
                     self._classifier = str(cur_win.get("classifier") or "recovered")
                     self._window_started_at = _parse_dt(cur_win.get("started_at"))
+                    meta = cur_win.get("metadata")
+                    if isinstance(meta, dict) and meta.get("is_call_window") is not None:
+                        self._is_call_window = bool(meta["is_call_window"])
+                    elif self._app_class or self._window_title:
+                        self._is_call_window = is_call_window(
+                            self._app_class, self._window_title
+                        )
+                    else:
+                        self._is_call_window = False
 
         if self.configured_mode() != "observe_only":
             logger.info(
@@ -324,9 +350,59 @@ class FocusPolicyModule(BaseModule):
             "calendar_event_id": event_id,
             "calendar_task_type": task_type,
             "is_productivity_block": is_prod,
+            "is_call_window": False if self._privacy_paused else self._is_call_window,
             "privacy_paused": self._privacy_paused,
             "dnd_mode": self._dnd_mode,
             "observed_window_events": self._observed_window_events,
+        }
+
+    async def get_focus_summary(self, now: datetime | None = None) -> dict[str, Any]:
+        """Return structured focus summary with call window, app, and durations."""
+        ref_now = ensure_aware(now) if now is not None else self._now()
+        cur_evt = await self._resolve_current_calendar_event(ref_now)
+        cal_task_type = (
+            str(cur_evt["task_type"]).strip().lower()
+            if cur_evt is not None and cur_evt.get("task_type")
+            else None
+        )
+
+        per_category_durations: dict[str, float] = {
+            "focused": 0.0,
+            "neutral": 0.0,
+            "distracted": 0.0,
+            "unknown": 0.0,
+        }
+
+        if self._db_connected() and not self._privacy_paused:
+            spans = await self.db.list_window_spans(limit=500)
+            for span in spans:
+                cat = str(span.get("category") or "unknown").strip().lower()
+                normalized_cat = _FOCUS_CATEGORY_ALIASES.get(cat, "unknown")
+                start_dt = _parse_dt(span.get("started_at"))
+                end_dt = _parse_dt(span.get("ended_at"))
+                if start_dt is not None:
+                    effective_end = end_dt if end_dt is not None else ref_now
+                    duration = max(0.0, (effective_end - start_dt).total_seconds())
+                    per_category_durations[normalized_cat] = (
+                        per_category_durations.get(normalized_cat, 0.0) + duration
+                    )
+
+        focus_state = "unknown" if self._privacy_paused else self._focus_state
+        app_class = None if self._privacy_paused else self._app_class
+        is_call = False if self._privacy_paused else self._is_call_window
+
+        return {
+            "focus_state": focus_state,
+            "current_focus_state": focus_state,
+            "is_call_window": is_call,
+            "app_class": app_class,
+            "active_app_class": app_class,
+            "window_title": None if self._privacy_paused else self._window_title,
+            "per_category_durations": per_category_durations,
+            "category_durations": per_category_durations,
+            "calendar_task_type": cal_task_type,
+            "idle": False if self._privacy_paused else self._idle,
+            "mode": self.effective_mode(),
         }
 
     async def _on_window_focus_changed(self, event: PlatformEvent) -> None:
@@ -378,6 +454,15 @@ class FocusPolicyModule(BaseModule):
         self._window_started_at = event_time
         self._observed_window_events += 1
 
+        if payload.get("is_call_window") is not None:
+            self._is_call_window = bool(payload["is_call_window"])
+        elif isinstance(payload.get("metadata"), dict) and "is_call_window" in payload["metadata"]:
+            self._is_call_window = bool(payload["metadata"]["is_call_window"])
+        elif app_class or window_title:
+            self._is_call_window = is_call_window(app_class, window_title)
+        else:
+            self._is_call_window = False
+
         logger.debug(
             "Observed window focus [mode=observe_only]: app_class=%r category=%s classifier=%s",
             self._app_class,
@@ -424,7 +509,7 @@ class FocusPolicyModule(BaseModule):
             not self._privacy_paused
             and self._app_class is not None
             and self._window_title is not None
-            and self._classifier in ("calendar_task", "default")
+            and self._classifier in ("calendar_task", "calendar_correlation", "default")
         ):
             cur_evt = await self._resolve_current_calendar_event(event_time)
             task_type = (
@@ -465,6 +550,7 @@ class FocusPolicyModule(BaseModule):
         self._window_title = None
         self._classifier = None
         self._window_started_at = None
+        self._is_call_window = False
         self._idle = False
         self._idle_since = None
 

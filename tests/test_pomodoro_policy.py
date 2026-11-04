@@ -378,3 +378,133 @@ async def test_pomodoro_global_pause_active_timer_skip_and_registry(
     assert registry.is_enabled("pomodoro_policy") is True
     assert await registry.disable_module("pomodoro_policy") is True
     assert registry.is_enabled("pomodoro_policy") is False
+
+
+async def test_pomodoro_highlights_walking_suitable_and_focused_blocks(
+    db: Database,
+    test_settings: Settings,
+) -> None:
+    t0 = datetime(2026, 11, 4, 9, 0, 0).astimezone()
+    now = t0
+
+    bus = EventBus()
+    created_events: list[PlatformEvent] = []
+    bus.subscribe("recommendation_created", created_events.append)
+
+    policy = PomodoroPolicyModule(
+        bus=bus,
+        db=db,
+        config=_pomodoro_config(test_settings),
+        clock=lambda: now,
+    )
+    await policy.start()
+    try:
+        # 1. Admin block highlights walking-suitable 25/5 block
+        await db.upsert_calendar_event(
+            event_id="evt_admin_highlight",
+            title="Inbox Cleanup",
+            start_time=t0,
+            end_time=t0 + timedelta(minutes=30),
+            task_type="admin",
+        )
+        rec_admin = await policy.evaluate()
+        assert rec_admin is not None
+        assert "walking-suitable 25/5 block" in rec_admin["message"]
+        assert rec_admin["action_payload"]["kind"] == "25_5"
+        assert rec_admin["action_payload"]["walking_suitable"] is True
+        await db.resolve_recommendation(rec_admin["id"], "dismissed", resolved_at=now)
+
+        # 2. Deep work block highlights focused 50/10 block
+        now = t0 + timedelta(minutes=35)
+        await db.upsert_calendar_event(
+            event_id="evt_deep_highlight",
+            title="Kernel Optimization",
+            start_time=now,
+            end_time=now + timedelta(hours=1),
+            task_type="deep_work",
+        )
+        rec_deep = await policy.evaluate()
+        assert rec_deep is not None
+        assert "focused 50/10 block" in rec_deep["message"]
+        assert rec_deep["action_payload"]["kind"] == "50_10"
+        assert rec_deep["action_payload"]["walking_suitable"] is False
+    finally:
+        await policy.stop()
+
+
+async def test_pomodoro_skips_when_call_window_active_or_task_unknown(
+    db: Database,
+    test_settings: Settings,
+) -> None:
+    t0 = datetime(2026, 11, 4, 11, 0, 0).astimezone()
+    now = t0
+
+    bus = EventBus()
+    created_events: list[PlatformEvent] = []
+    bus.subscribe("recommendation_created", created_events.append)
+
+    policy = PomodoroPolicyModule(
+        bus=bus,
+        db=db,
+        config=_pomodoro_config(test_settings),
+        clock=lambda: now,
+    )
+    await policy.start()
+    try:
+        # 1. Active coding block + active call window -> skips Pomodoro
+        await db.upsert_calendar_event(
+            event_id="evt_coding_call",
+            title="Frontend Dev",
+            start_time=t0,
+            end_time=t0 + timedelta(hours=1),
+            task_type="coding",
+        )
+        await bus.publish(
+            PlatformEvent(
+                type="window_focus_changed",
+                source="hyprland_ipc",
+                timestamp=now,
+                payload={
+                    "app_class": "teams",
+                    "title": "Microsoft Teams",
+                    "is_call_window": True,
+                },
+            )
+        )
+        assert await policy.evaluate() is None
+        assert created_events == []
+
+        # Switch away from call window -> evaluates and creates recommendation
+        await bus.publish(
+            PlatformEvent(
+                type="window_focus_changed",
+                source="hyprland_ipc",
+                timestamp=now,
+                payload={
+                    "app_class": "code",
+                    "title": "app.tsx",
+                    "is_call_window": False,
+                },
+            )
+        )
+        assert len(created_events) == 1
+        assert created_events[0].dedupe_key == "pomodoro:event:evt_coding_call"
+        await db.resolve_recommendation(
+            created_events[0].payload["id"],
+            "dismissed",
+            resolved_at=now,
+        )
+
+        # 2. Block with task_type == "unknown" -> skipped
+        now = t0 + timedelta(hours=2)
+        await db.upsert_calendar_event(
+            event_id="evt_unknown_block",
+            title="Random Busy Time",
+            start_time=now,
+            end_time=now + timedelta(hours=1),
+            task_type="unknown",
+        )
+        assert await policy.evaluate() is None
+        assert len(created_events) == 1
+    finally:
+        await policy.stop()

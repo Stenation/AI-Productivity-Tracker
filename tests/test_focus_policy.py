@@ -385,3 +385,105 @@ async def test_focus_policy_privacy_pause_and_registry_e2e_integration(
             reader.feed_eof()
             await hypr.stop()
 
+
+async def test_focus_policy_calendar_correlation_and_summary_metrics(
+    db: Database,
+    test_settings: Settings,
+) -> None:
+    t0 = datetime(2026, 11, 4, 10, 0, 0).astimezone()
+    bus = EventBus()
+
+    policy = FocusPolicyModule(
+        bus=bus,
+        db=db,
+        config=test_settings.model_dump(),
+        clock=lambda: t0,
+    )
+    await policy.start()
+    try:
+        # 1. Calendar event: Coding block
+        await bus.publish(
+            PlatformEvent(
+                type="calendar_context_changed",
+                source="google_calendar",
+                timestamp=t0,
+                payload={
+                    "current_event": {
+                        "event_id": "evt_coding_correlate",
+                        "title": "Backend Refactor",
+                        "task_type": "coding",
+                        "start_time": t0.isoformat(),
+                        "end_time": (t0 + timedelta(hours=1)).isoformat(),
+                    }
+                },
+            )
+        )
+
+        # Window: API documentation in Firefox -> correlated as focused due to coding block!
+        await bus.publish(
+            PlatformEvent(
+                type="window_focus_changed",
+                source="hyprland_ipc",
+                timestamp=t0,
+                payload={
+                    "app_class": "firefox",
+                    "title": "FastAPI Documentation — Mozilla Firefox",
+                },
+            )
+        )
+        snap = await policy.get_context_snapshot(now=t0)
+        assert snap["focus_state"] == "focused"
+        assert snap["classifier"] == "calendar_correlation"
+
+        # 2. Window: Zoom call window -> tracks is_call_window=True
+        t1 = t0 + timedelta(minutes=10)
+        await bus.publish(
+            PlatformEvent(
+                type="window_focus_changed",
+                source="hyprland_ipc",
+                timestamp=t1,
+                payload={
+                    "app_class": "zoom",
+                    "title": "Architecture Sync",
+                    "is_call_window": True,
+                },
+            )
+        )
+        snap_call = await policy.get_context_snapshot(now=t1)
+        assert snap_call["is_call_window"] is True
+
+        # 3. Simulate window spans in SQLite for duration tracking
+        await db.open_window_span(
+            app_class="code",
+            window_title="main.py",
+            category="focused",
+            started_at=t0 - timedelta(minutes=20),
+        )
+        await db.close_current_window_span(ended_at=t0 - timedelta(minutes=5))  # 15m = 900s
+
+        await db.open_window_span(
+            app_class="firefox",
+            window_title="Reddit",
+            category="distracted",
+            started_at=t0 - timedelta(minutes=5),
+        )
+        await db.close_current_window_span(ended_at=t0)  # 5m = 300s
+
+        # 4. Verify get_focus_summary() metrics
+        summary = await policy.get_focus_summary(now=t1)
+        assert summary["is_call_window"] is True
+        assert summary["app_class"] == "zoom"
+        assert summary["focus_state"] is not None
+        assert "per_category_durations" in summary
+        durations = summary["per_category_durations"]
+        assert durations["focused"] >= 900.0
+        assert durations["distracted"] >= 300.0
+        assert durations["neutral"] >= 0.0
+        assert durations["unknown"] >= 0.0
+
+        # Strict observe-only: zero recommendations created
+        assert await db.list_recommendations() == []
+        assert await policy.evaluate(now=t1) is None
+    finally:
+        await policy.stop()
+

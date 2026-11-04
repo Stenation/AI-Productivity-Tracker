@@ -286,3 +286,77 @@ async def test_meeting_periodic_evaluation_global_pause_and_registry(
     assert registry.is_enabled("meeting_policy") is True
     assert await registry.disable_module("meeting_policy") is True
     assert registry.is_enabled("meeting_policy") is False
+
+
+async def test_meeting_warning_suppressed_when_user_returned_to_call_window_with_input(
+    db: Database,
+    test_settings: Settings,
+) -> None:
+    t0 = datetime(2026, 11, 4, 13, 0, 0).astimezone()
+    now = t0
+
+    bus = EventBus()
+    created_events: list[PlatformEvent] = []
+    bus.subscribe("recommendation_created", created_events.append)
+
+    policy = MeetingPolicyModule(
+        bus=bus,
+        db=db,
+        config=_meeting_config(test_settings, pre_meeting_warning_minutes=10),
+        clock=lambda: now,
+    )
+    await policy.start()
+    try:
+        # User is marked as walking
+        await db.open_activity_span("walking", "manual_control", started_at=t0)
+
+        # Upcoming meeting in 8 minutes
+        meeting_start = t0 + timedelta(minutes=8)
+        await db.upsert_calendar_event(
+            event_id="evt_desk_return_check",
+            title="Sprint Retro",
+            start_time=meeting_start,
+            end_time=meeting_start + timedelta(minutes=30),
+            task_type="meeting",
+        )
+
+        # 1. User has already opened Zoom call window with active input -> warning suppressed!
+        await bus.publish(
+            PlatformEvent(
+                type="window_focus_changed",
+                source="hyprland_ipc",
+                timestamp=now,
+                payload={
+                    "app_class": "zoom",
+                    "title": "Zoom Meeting",
+                    "is_call_window": True,
+                },
+            )
+        )
+        await bus.publish(
+            PlatformEvent(
+                type="input_idle_changed",
+                source="hypridle",
+                timestamp=now,
+                payload={"idle": False},
+            )
+        )
+        assert await policy.evaluate() is None
+        assert created_events == []
+
+        # 2. If input becomes idle (e.g. left Zoom open but walked away) -> warning triggers!
+        await bus.publish(
+            PlatformEvent(
+                type="input_idle_changed",
+                source="hypridle",
+                timestamp=now,
+                payload={"idle": True, "idle_seconds": 120},
+            )
+        )
+        assert len(created_events) == 1
+        ev = created_events[0]
+        assert ev.dedupe_key == "meeting:warn:evt_desk_return_check"
+        assert ev.payload["suggested_action"] == "return_to_desk"
+        assert "Sprint Retro" in ev.payload["message"]
+    finally:
+        await policy.stop()

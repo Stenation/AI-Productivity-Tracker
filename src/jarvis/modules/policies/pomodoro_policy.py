@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from jarvis.core.bus import EventBus
+from jarvis.core.classification import is_call_window
 from jarvis.core.database import VALID_RECOMMENDATION_RESOLUTIONS, Database
 from jarvis.core.schema import (
     PlatformEvent,
@@ -118,13 +119,18 @@ class PomodoroPolicyModule(BaseModule):
         self._cached_current_event: dict[str, Any] | None = None
         self._cached_next_event: dict[str, Any] | None = None
 
+        self._current_activity: str | None = None
+        self._current_app_class: str | None = None
+        self._current_window_title: str | None = None
+        self._is_call_window: bool = False
+
         self._eval_lock = asyncio.Lock()
         self._running: bool = False
         self._last_event_at: datetime | None = None
         self._last_error: str | None = None
 
     async def start(self) -> None:
-        """Subscribe to calendar, resolution, and privacy events."""
+        """Subscribe to calendar, activity, window, resolution, and privacy events."""
         self._privacy_paused = self._extract_privacy_paused(self.config)
         self._dnd_mode = self._extract_dnd_mode(self.config)
 
@@ -136,6 +142,8 @@ class PomodoroPolicyModule(BaseModule):
         self.bus.subscribe("calendar_context_changed", self._on_calendar_context_changed)
         self.bus.subscribe("recommendation_resolved", self._on_recommendation_resolved)
         self.bus.subscribe("privacy_mode_changed", self._on_privacy_mode_changed)
+        self.bus.subscribe("activity_state_changed", self._on_activity_state_changed)
+        self.bus.subscribe("window_focus_changed", self._on_window_focus_changed)
         self._running = True
         self._last_error = None
 
@@ -145,6 +153,8 @@ class PomodoroPolicyModule(BaseModule):
         self.bus.unsubscribe("calendar_context_changed", self._on_calendar_context_changed)
         self.bus.unsubscribe("recommendation_resolved", self._on_recommendation_resolved)
         self.bus.unsubscribe("privacy_mode_changed", self._on_privacy_mode_changed)
+        self.bus.unsubscribe("activity_state_changed", self._on_activity_state_changed)
+        self.bus.unsubscribe("window_focus_changed", self._on_window_focus_changed)
 
     async def reload_config(self, config: dict[str, Any]) -> None:
         """Refresh configuration and runtime privacy flags."""
@@ -187,6 +197,10 @@ class PomodoroPolicyModule(BaseModule):
             if self._privacy_paused or not self._db_connected():
                 return None
 
+            # Skip if an ad-hoc call window is currently active
+            if await self._is_in_call_window():
+                return None
+
             ref_now = ensure_aware(now) if now is not None else self._now()
             current_event, next_event = await self._resolve_calendar_context(ref_now)
 
@@ -213,6 +227,8 @@ class PomodoroPolicyModule(BaseModule):
                     continue
 
                 task_type = str(target_event.get("task_type", "unknown")).strip().lower()
+                if not task_type or task_type == "unknown":
+                    continue
                 kind = select_pomodoro(task_type, self.config)
                 if kind is None:
                     continue
@@ -241,6 +257,8 @@ class PomodoroPolicyModule(BaseModule):
                     "calendar_event_id": event_id,
                     "task_type": task_type,
                 }
+                if self._current_activity:
+                    action_payload["current_activity"] = self._current_activity
                 # Milestone 1: never auto-start timers, even if auto_start is set in config.
                 return await self._create_and_publish(
                     message=message,
@@ -334,6 +352,50 @@ class PomodoroPolicyModule(BaseModule):
         self._update_cached_calendar_from_payload(event.payload, event_time)
         await self.evaluate(now=event_time)
 
+    async def _on_activity_state_changed(self, event: PlatformEvent) -> None:
+        event_time = self._event_now(event)
+        self._last_event_at = event_time
+        act = event.payload.get("activity")
+        if isinstance(act, str):
+            self._current_activity = act
+        await self.evaluate(now=event_time)
+
+    async def _on_window_focus_changed(self, event: PlatformEvent) -> None:
+        event_time = self._event_now(event)
+        self._last_event_at = event_time
+        payload = event.payload
+        app_class = str(payload.get("app_class") or "")
+        window_title = str(payload.get("window_title") or payload.get("title") or "")
+        self._current_app_class = app_class
+        self._current_window_title = window_title
+
+        if payload.get("is_call_window") is not None:
+            self._is_call_window = bool(payload["is_call_window"])
+        elif isinstance(payload.get("metadata"), dict) and "is_call_window" in payload["metadata"]:
+            self._is_call_window = bool(payload["metadata"]["is_call_window"])
+        elif app_class or window_title:
+            self._is_call_window = is_call_window(app_class, window_title)
+        else:
+            self._is_call_window = False
+
+        await self.evaluate(now=event_time)
+
+    async def _is_in_call_window(self) -> bool:
+        if self._is_call_window:
+            return True
+        if self._db_connected():
+            cur_win = await self.db.get_current_window_span()
+            if cur_win is not None:
+                meta = cur_win.get("metadata")
+                if isinstance(meta, dict) and meta.get("is_call_window") is True:
+                    return True
+                if is_call_window(
+                    str(cur_win.get("app_class") or ""),
+                    str(cur_win.get("window_title") or ""),
+                ):
+                    return True
+        return False
+
     async def _on_recommendation_resolved(self, event: PlatformEvent) -> None:
         event_time = self._event_now(event)
         self._last_event_at = event_time
@@ -371,6 +433,11 @@ class PomodoroPolicyModule(BaseModule):
         if "dnd_mode" in payload and payload["dnd_mode"] is not None:
             self._dnd_mode = bool(payload["dnd_mode"])
             self._sync_privacy_in_config("dnd_mode", self._dnd_mode)
+
+        if self._privacy_paused:
+            self._is_call_window = False
+            self._current_app_class = None
+            self._current_window_title = None
 
     async def _resolve_calendar_context(
         self,
@@ -453,20 +520,27 @@ class PomodoroPolicyModule(BaseModule):
         now: datetime,
     ) -> str:
         title = str(target_event.get("title") or "Focus block")
-        display_kind = kind.replace("_", "/")
-        walk_note = " (walking-compatible)" if walking_suitable else ""
+        task_type = str(target_event.get("task_type", "")).strip().lower()
+
+        if task_type in {"admin", "email", "planning"}:
+            timer_label = "walking-suitable 25/5 block"
+        elif task_type in {"deep_work", "coding"}:
+            timer_label = "focused 50/10 block"
+        else:
+            display_kind = kind.replace("_", "/")
+            timer_label = f"{display_kind} block"
 
         if is_active_block:
-            return f"'{title}' is active{walk_note}. Suggested Pomodoro timer: {display_kind}."
+            return f"'{title}' is active. Suggested Pomodoro timer: {timer_label}."
 
         start_dt = _parse_dt(target_event.get("start_time"))
         if start_dt is not None:
             mins = max(1, int(round((start_dt - now).total_seconds() / 60)))
             return (
-                f"'{title}' starts in {mins} minutes{walk_note}. "
-                f"Suggested Pomodoro timer: {display_kind}."
+                f"'{title}' starts in {mins} minutes. "
+                f"Suggested Pomodoro timer: {timer_label}."
             )
-        return f"'{title}' is starting soon{walk_note}. Suggested Pomodoro timer: {display_kind}."
+        return f"'{title}' is starting soon. Suggested Pomodoro timer: {timer_label}."
 
     def _now(self) -> datetime:
         return ensure_aware(self._clock())

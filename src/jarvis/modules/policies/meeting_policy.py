@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 from typing import Any, cast
 
 from jarvis.core.bus import EventBus
+from jarvis.core.classification import is_call_window
 from jarvis.core.database import VALID_RECOMMENDATION_RESOLUTIONS, Database
 from jarvis.core.schema import (
     ActivityState,
@@ -72,6 +73,9 @@ class MeetingPolicyModule(BaseModule):
         self._activity_started_at: datetime | None = None
         self._cached_next_event: dict[str, Any] | None = None
 
+        self._is_idle: bool = False
+        self._is_call_window: bool = False
+
         self._eval_lock = asyncio.Lock()
         self._loop_task: asyncio.Task[None] | None = None
         self._running: bool = False
@@ -79,7 +83,7 @@ class MeetingPolicyModule(BaseModule):
         self._last_error: str | None = None
 
     async def start(self) -> None:
-        """Subscribe to calendar/activity/privacy events and start periodic evaluation."""
+        """Subscribe to events and start periodic evaluation."""
         await self._cancel_loop()
 
         self._privacy_paused = self._extract_privacy_paused(self.config)
@@ -94,6 +98,8 @@ class MeetingPolicyModule(BaseModule):
         self.bus.subscribe("activity_state_changed", self._on_activity_state_changed)
         self.bus.subscribe("recommendation_resolved", self._on_recommendation_resolved)
         self.bus.subscribe("privacy_mode_changed", self._on_privacy_mode_changed)
+        self.bus.subscribe("window_focus_changed", self._on_window_focus_changed)
+        self.bus.subscribe("input_idle_changed", self._on_input_idle_changed)
 
         self._running = True
         self._last_error = None
@@ -109,6 +115,8 @@ class MeetingPolicyModule(BaseModule):
         self.bus.unsubscribe("activity_state_changed", self._on_activity_state_changed)
         self.bus.unsubscribe("recommendation_resolved", self._on_recommendation_resolved)
         self.bus.unsubscribe("privacy_mode_changed", self._on_privacy_mode_changed)
+        self.bus.unsubscribe("window_focus_changed", self._on_window_focus_changed)
+        self.bus.unsubscribe("input_idle_changed", self._on_input_idle_changed)
         await self._cancel_loop()
 
     async def reload_config(self, config: dict[str, Any]) -> None:
@@ -160,6 +168,11 @@ class MeetingPolicyModule(BaseModule):
         """Check whether an upcoming meeting starts within warning window while walking/away."""
         async with self._eval_lock:
             if self._privacy_paused or not self._db_connected():
+                return None
+
+            # Suppress redundant warning if the user has already returned to a desk call window
+            # (is_call_window=True with recent input activity, i.e., not idle).
+            if not self._is_idle and await self._is_in_call_window():
                 return None
 
             ref_now = ensure_aware(now) if now is not None else self._now()
@@ -339,6 +352,51 @@ class MeetingPolicyModule(BaseModule):
         self._update_cached_next_event(event.payload, event_time)
         await self.evaluate(now=event_time)
 
+    async def _on_window_focus_changed(self, event: PlatformEvent) -> None:
+        event_time = self._event_now(event)
+        self._last_event_at = event_time
+        payload = event.payload
+        app_class = str(payload.get("app_class") or "")
+        window_title = str(payload.get("window_title") or payload.get("title") or "")
+
+        if payload.get("is_call_window") is not None:
+            self._is_call_window = bool(payload["is_call_window"])
+        elif isinstance(payload.get("metadata"), dict) and "is_call_window" in payload["metadata"]:
+            self._is_call_window = bool(payload["metadata"]["is_call_window"])
+        elif app_class or window_title:
+            self._is_call_window = is_call_window(app_class, window_title)
+        else:
+            self._is_call_window = False
+
+        await self.evaluate(now=event_time)
+
+    async def _on_input_idle_changed(self, event: PlatformEvent) -> None:
+        event_time = self._event_now(event)
+        self._last_event_at = event_time
+        payload = event.payload
+        raw_idle = payload.get("idle")
+        if raw_idle is None:
+            raw_idle = payload.get("is_idle")
+        if raw_idle is not None:
+            self._is_idle = bool(raw_idle)
+        await self.evaluate(now=event_time)
+
+    async def _is_in_call_window(self) -> bool:
+        if self._is_call_window:
+            return True
+        if self._db_connected():
+            cur_win = await self.db.get_current_window_span()
+            if cur_win is not None:
+                meta = cur_win.get("metadata")
+                if isinstance(meta, dict) and meta.get("is_call_window") is True:
+                    return True
+                if is_call_window(
+                    str(cur_win.get("app_class") or ""),
+                    str(cur_win.get("window_title") or ""),
+                ):
+                    return True
+        return False
+
     async def _on_recommendation_resolved(self, event: PlatformEvent) -> None:
         event_time = self._event_now(event)
         self._last_event_at = event_time
@@ -376,6 +434,10 @@ class MeetingPolicyModule(BaseModule):
         if "dnd_mode" in payload and payload["dnd_mode"] is not None:
             self._dnd_mode = bool(payload["dnd_mode"])
             self._sync_privacy_in_config("dnd_mode", self._dnd_mode)
+
+        if self._privacy_paused:
+            self._is_call_window = False
+            self._is_idle = False
 
     async def _periodic_loop(self) -> None:
         try:

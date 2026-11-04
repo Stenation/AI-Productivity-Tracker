@@ -448,3 +448,204 @@ async def test_periodic_loop_privacy_global_pause_and_registry_wiring(
     assert registry.is_enabled("posture_policy") is True
     assert await registry.disable_module("posture_policy") is True
     assert registry.is_enabled("posture_policy") is False
+
+
+async def test_deep_work_sitting_55m_recommends_stand_and_50_10_timer(
+    db: Database,
+    test_settings: Settings,
+) -> None:
+    t0 = datetime(2026, 11, 4, 10, 0, 0).astimezone()
+    now = t0
+
+    bus = EventBus()
+    created_events: list[PlatformEvent] = []
+    bus.subscribe("recommendation_created", created_events.append)
+
+    policy = PosturePolicyModule(
+        bus=bus,
+        db=db,
+        config=_policy_config(test_settings, max_sitting_minutes=50),
+        clock=lambda: now,
+    )
+    await policy.start()
+    try:
+        await db.open_activity_span("sitting", "manual_control", started_at=t0)
+        await db.upsert_calendar_event(
+            event_id="evt_deep_work",
+            title="Deep Work: Distributed Systems",
+            start_time=t0,
+            end_time=t0 + timedelta(hours=2),
+            task_type="deep_work",
+        )
+
+        # Sitting for 55m during Deep Work without active timer
+        now = t0 + timedelta(minutes=55)
+        rec = await policy.evaluate()
+        assert rec is not None
+        assert rec["policy"] == "posture_policy"
+        assert rec["suggested_action"] == "stand"
+        assert rec["dedupe_key"] == SITTING_DEDUPE_KEY
+        assert rec["action_payload"]["recommended_pomodoro"] == "50_10"
+        assert rec["action_payload"]["walking_suitable"] is False
+        assert "50/10" in rec["message"]
+        assert "Deep Work" in rec["message"]
+        assert len(created_events) == 1
+        assert created_events[0].payload["action_payload"]["recommended_pomodoro"] == "50_10"
+    finally:
+        await policy.stop()
+
+
+async def test_admin_block_sitting_20m_triggers_walking_block_nudge(
+    db: Database,
+    test_settings: Settings,
+) -> None:
+    t0 = datetime(2026, 11, 4, 14, 0, 0).astimezone()
+    now = t0
+
+    bus = EventBus()
+    created_events: list[PlatformEvent] = []
+    bus.subscribe("recommendation_created", created_events.append)
+
+    policy = PosturePolicyModule(
+        bus=bus,
+        db=db,
+        config=_policy_config(
+            test_settings,
+            max_sitting_minutes=50,
+            walking_block_sit_threshold_minutes=20,
+            recommendation_cooldown_minutes=30,
+        ),
+        clock=lambda: now,
+    )
+    await policy.start()
+    try:
+        await db.open_activity_span("sitting", "manual_control", started_at=t0)
+        await db.upsert_calendar_event(
+            event_id="evt_admin_triage",
+            title="Email & Invoices",
+            start_time=t0,
+            end_time=t0 + timedelta(hours=2),
+            task_type="admin",
+        )
+
+        # 19 minutes (< 20m threshold) -> no recommendation
+        now = t0 + timedelta(minutes=19, seconds=50)
+        assert await policy.evaluate() is None
+        assert created_events == []
+
+        # 20 minutes -> walking-suitable block recommendation
+        now = t0 + timedelta(minutes=20)
+        rec = await policy.evaluate()
+        assert rec is not None
+        assert rec["suggested_action"] == "walk"
+        assert rec["dedupe_key"] == "posture:walk_block:evt_admin_triage"
+        assert rec["action_payload"]["recommended_pomodoro"] == "25_5"
+        assert rec["action_payload"]["walking_suitable"] is True
+        assert rec["action_payload"]["calendar_event_id"] == "evt_admin_triage"
+        assert len(created_events) == 1
+
+        # While pending, no duplicate or contradictory stand recommendation is created
+        now = t0 + timedelta(minutes=50)
+        assert await policy.evaluate() is None
+        assert len(created_events) == 1
+
+        # Resolve walking block recommendation
+        await db.resolve_recommendation(rec["id"], "dismissed", resolved_at=now)
+
+        # Still within 30m cooldown -> suppressed, no contradictory generic stand
+        now = now + timedelta(minutes=20)
+        assert await policy.evaluate() is None
+        assert len(created_events) == 1
+    finally:
+        await policy.stop()
+
+
+async def test_posture_nudges_suppressed_by_ad_hoc_call_and_input_idle(
+    db: Database,
+    test_settings: Settings,
+) -> None:
+    t0 = datetime(2026, 11, 4, 11, 0, 0).astimezone()
+    now = t0
+
+    bus = EventBus()
+    created_events: list[PlatformEvent] = []
+    bus.subscribe("recommendation_created", created_events.append)
+
+    policy = PosturePolicyModule(
+        bus=bus,
+        db=db,
+        config=_policy_config(test_settings, max_sitting_minutes=50),
+        clock=lambda: now,
+    )
+    await policy.start()
+    try:
+        await db.open_activity_span("sitting", "manual_control", started_at=t0)
+        now = t0 + timedelta(minutes=60)
+
+        # 1. Ad-hoc call window active -> posture nudge suppressed
+        await bus.publish(
+            PlatformEvent(
+                type="window_focus_changed",
+                source="hyprland_ipc",
+                timestamp=now,
+                payload={
+                    "app_class": "zoom",
+                    "title": "Zoom Meeting",
+                    "is_call_window": True,
+                },
+            )
+        )
+        assert await policy.evaluate() is None
+        assert created_events == []
+
+        # Switch to regular coding window -> nudge fires via event handler
+        await bus.publish(
+            PlatformEvent(
+                type="window_focus_changed",
+                source="hyprland_ipc",
+                timestamp=now,
+                payload={
+                    "app_class": "code",
+                    "title": "main.py",
+                    "is_call_window": False,
+                },
+            )
+        )
+        assert len(created_events) == 1
+        rec1 = created_events[0].payload
+        assert rec1["suggested_action"] == "stand_or_walk"
+
+        # Resolve recommendation
+        await db.resolve_recommendation(rec1["id"], "dismissed", resolved_at=now)
+
+        # Reset sitting span at t1
+        t1 = now + timedelta(minutes=35)
+        now = t1 + timedelta(minutes=60)
+        await db.open_activity_span("sitting", "manual_control", started_at=t1)
+
+        # 2. Input idle active -> posture nudge suppressed
+        await bus.publish(
+            PlatformEvent(
+                type="input_idle_changed",
+                source="hypridle",
+                timestamp=now,
+                payload={"idle": True, "idle_seconds": 300},
+            )
+        )
+        assert await policy.evaluate() is None
+        assert len(created_events) == 1
+
+        # Input active again -> nudge fires via event handler
+        await bus.publish(
+            PlatformEvent(
+                type="input_idle_changed",
+                source="hypridle",
+                timestamp=now,
+                payload={"idle": False},
+            )
+        )
+        assert len(created_events) == 2
+        rec2 = created_events[1].payload
+        assert rec2["dedupe_key"] == SITTING_DEDUPE_KEY
+    finally:
+        await policy.stop()

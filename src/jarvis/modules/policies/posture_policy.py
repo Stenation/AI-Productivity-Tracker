@@ -10,6 +10,10 @@ from datetime import datetime, timedelta
 from typing import Any, cast
 
 from jarvis.core.bus import EventBus
+from jarvis.core.classification import (
+    get_recommended_pomodoro,
+    is_call_window,
+)
 from jarvis.core.database import VALID_RECOMMENDATION_RESOLUTIONS, Database
 from jarvis.core.schema import (
     ActivityState,
@@ -28,6 +32,7 @@ DEFAULT_PRE_MEETING_WARNING_MINUTES = 10
 DEFAULT_COOLDOWN_MINUTES = 30
 DEFAULT_CHECK_INTERVAL_SECONDS = 60.0
 DEFAULT_UPCOMING_WINDOW_MINUTES = 30
+DEFAULT_WALKING_BLOCK_SIT_THRESHOLD_MINUTES = 20
 
 SITTING_DEDUPE_KEY = "posture:sitting"
 WALKING_DEDUPE_KEY = "posture:walking"
@@ -83,6 +88,11 @@ class PosturePolicyModule(BaseModule):
         self._cached_current_event: dict[str, Any] | None = None
         self._cached_next_event: dict[str, Any] | None = None
 
+        self._is_idle: bool = False
+        self._is_call_window: bool = False
+        self._active_app_class: str | None = None
+        self._active_window_title: str | None = None
+
         self._eval_lock = asyncio.Lock()
         self._loop_task: asyncio.Task[None] | None = None
         self._running: bool = False
@@ -90,7 +100,7 @@ class PosturePolicyModule(BaseModule):
         self._last_error: str | None = None
 
     async def start(self) -> None:
-        """Subscribe to state/calendar/privacy events and start periodic evaluation."""
+        """Subscribe to state/calendar/privacy/window/idle events and start periodic evaluation."""
         await self._cancel_loop()
 
         self._privacy_paused = self._extract_privacy_paused(self.config)
@@ -105,6 +115,8 @@ class PosturePolicyModule(BaseModule):
         self.bus.subscribe("calendar_context_changed", self._on_calendar_context_changed)
         self.bus.subscribe("recommendation_resolved", self._on_recommendation_resolved)
         self.bus.subscribe("privacy_mode_changed", self._on_privacy_mode_changed)
+        self.bus.subscribe("window_focus_changed", self._on_window_focus_changed)
+        self.bus.subscribe("input_idle_changed", self._on_input_idle_changed)
 
         self._running = True
         self._last_error = None
@@ -120,6 +132,8 @@ class PosturePolicyModule(BaseModule):
         self.bus.unsubscribe("calendar_context_changed", self._on_calendar_context_changed)
         self.bus.unsubscribe("recommendation_resolved", self._on_recommendation_resolved)
         self.bus.unsubscribe("privacy_mode_changed", self._on_privacy_mode_changed)
+        self.bus.unsubscribe("window_focus_changed", self._on_window_focus_changed)
+        self.bus.unsubscribe("input_idle_changed", self._on_input_idle_changed)
         await self._cancel_loop()
 
     async def reload_config(self, config: dict[str, Any]) -> None:
@@ -182,10 +196,25 @@ class PosturePolicyModule(BaseModule):
         raw = self._get_posture_value("upcoming_window_minutes")
         return float(raw) if raw is not None else float(DEFAULT_UPCOMING_WINDOW_MINUTES)
 
+    def walking_block_sit_threshold_minutes(self) -> float:
+        """Return sitting duration threshold before recommending a walking-suitable block."""
+        raw = self._get_posture_value("walking_block_sit_threshold_minutes")
+        return (
+            float(raw)
+            if raw is not None
+            else float(DEFAULT_WALKING_BLOCK_SIT_THRESHOLD_MINUTES)
+        )
+
     async def evaluate(self, now: datetime | None = None) -> dict[str, Any] | None:
         """Evaluate current posture duration and calendar context once."""
         async with self._eval_lock:
             if self._privacy_paused or not self._db_connected():
+                return None
+
+            # Ad-hoc call & idle suppression
+            if self._is_idle:
+                return None
+            if await self._is_in_call_window():
                 return None
 
             ref_now = ensure_aware(now) if now is not None else self._now()
@@ -197,14 +226,11 @@ class PosturePolicyModule(BaseModule):
             elapsed_minutes = int(elapsed_seconds // 60)
 
             if activity == "sitting":
-                max_sit = self.max_sitting_minutes()
-                if elapsed_seconds < max_sit * 60.0:
-                    return None
-                return await self._evaluate_sitting(
+                return await self._evaluate_sitting_pipeline(
                     now=ref_now,
                     started_at=started_at,
-                    elapsed_minutes=max(int(max_sit), elapsed_minutes),
-                    max_sit_minutes=max_sit,
+                    elapsed_seconds=elapsed_seconds,
+                    elapsed_minutes=elapsed_minutes,
                 )
 
             max_walk = self.max_walking_minutes()
@@ -217,13 +243,13 @@ class PosturePolicyModule(BaseModule):
                 max_walk_minutes=max_walk,
             )
 
-    async def _evaluate_sitting(
+    async def _evaluate_sitting_pipeline(
         self,
         *,
         now: datetime,
         started_at: datetime,
+        elapsed_seconds: float,
         elapsed_minutes: int,
-        max_sit_minutes: float,
     ) -> dict[str, Any] | None:
         current_event, next_event = await self._resolve_calendar_context(now)
 
@@ -231,6 +257,89 @@ class PosturePolicyModule(BaseModule):
         if current_event is not None and str(current_event.get("task_type")) == "meeting":
             return None
 
+        imminent_meeting = self._is_imminent_meeting(next_event, now)
+        current_task = (
+            str(current_event.get("task_type", "unknown")).strip().lower()
+            if current_event is not None
+            else "unknown"
+        )
+
+        # 1. Walking-suitable block nudge:
+        # When a walking-suitable calendar block (admin, email, planning) is active and the user
+        # has been sitting for at least walking_block_sit_threshold_minutes (default 20 min)
+        # with no impending meeting, recommend switching to a walking block.
+        # Prefer walking-block over generic stand.
+        is_walking_block = (
+            current_event is not None
+            and current_task in {"admin", "email", "planning"}
+            and not imminent_meeting
+        )
+        if is_walking_block:
+            walk_thresh = self.walking_block_sit_threshold_minutes()
+            if elapsed_seconds >= walk_thresh * 60.0:
+                event_id = str(current_event.get("event_id") or "active")
+                dedupe_key = f"posture:walk_block:{event_id}"
+                if await self._is_suppressed(
+                    dedupe_key,
+                    now=now,
+                    activity_started_at=started_at,
+                ):
+                    return None
+
+                title = str(
+                    current_event.get("title")
+                    or current_task.replace("_", " ").title()
+                )
+                effective_elapsed = max(int(walk_thresh), elapsed_minutes)
+                message = (
+                    f"You have been sitting for {effective_elapsed} minutes during '{title}'. "
+                    "Switch to a walking block (recommended timer: 25/5)."
+                )
+                action_payload: dict[str, Any] = {
+                    "activity": "sitting",
+                    "elapsed_minutes": effective_elapsed,
+                    "max_sitting_minutes": int(self.max_sitting_minutes()),
+                    "recommended_activity": "walking",
+                    "walking_suitable": True,
+                    "calendar_event_id": current_event.get("event_id"),
+                    "recommended_pomodoro": "25_5",
+                    "task_type": current_task,
+                }
+                return await self._create_and_publish(
+                    message=message,
+                    suggested_action="walk",
+                    action_payload=action_payload,
+                    dedupe_key=dedupe_key,
+                    now=now,
+                )
+            # If active walking-suitable block is active but below walking-block sit threshold,
+            # do not fall through to emit a generic stand recommendation.
+            return None
+
+        # 2. General sitting threshold
+        max_sit = self.max_sitting_minutes()
+        if elapsed_seconds < max_sit * 60.0:
+            return None
+
+        return await self._evaluate_sitting(
+            now=now,
+            started_at=started_at,
+            elapsed_minutes=max(int(max_sit), elapsed_minutes),
+            max_sit_minutes=max_sit,
+            current_event=current_event,
+            next_event=next_event,
+        )
+
+    async def _evaluate_sitting(
+        self,
+        *,
+        now: datetime,
+        started_at: datetime,
+        elapsed_minutes: int,
+        max_sit_minutes: float,
+        current_event: dict[str, Any] | None,
+        next_event: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
         if await self._is_suppressed(
             SITTING_DEDUPE_KEY,
             now=now,
@@ -256,12 +365,36 @@ class PosturePolicyModule(BaseModule):
             suggested_action = "stand_or_walk"
             recommended_activity = "standing_or_walking"
 
+        target_task = (
+            str(target_event.get("task_type", "unknown")).strip().lower()
+            if target_event is not None
+            else "unknown"
+        )
+
+        active_timer = (
+            await self.db.get_active_timer() if self._db_connected() else None
+        )
+        has_active_timer = active_timer is not None
+
+        pomo_preset = (
+            get_recommended_pomodoro(target_task, self.config.get("pomodoro"))
+            if target_task != "unknown"
+            else None
+        )
+
+        is_deep_stand = (
+            target_task in {"deep_work", "coding", "reading"}
+            and not has_active_timer
+            and pomo_preset is not None
+        )
+
         message = self._build_sitting_message(
             elapsed_minutes=elapsed_minutes,
             suggested_action=suggested_action,
             current_event=current_event,
             upcoming_event=upcoming_event,
             now=now,
+            recommended_pomodoro=pomo_preset if is_deep_stand else None,
         )
         action_payload: dict[str, Any] = {
             "activity": "sitting",
@@ -277,6 +410,9 @@ class PosturePolicyModule(BaseModule):
                 target_event.get("event_id") if target_event is not None else None
             ),
         }
+        if is_deep_stand:
+            action_payload["recommended_pomodoro"] = pomo_preset
+
         return await self._create_and_publish(
             message=message,
             suggested_action=suggested_action,
@@ -440,6 +576,53 @@ class PosturePolicyModule(BaseModule):
         self._update_cached_calendar_from_payload(event.payload, event_time)
         await self.evaluate(now=event_time)
 
+    async def _on_window_focus_changed(self, event: PlatformEvent) -> None:
+        event_time = self._event_now(event)
+        self._last_event_at = event_time
+        payload = event.payload
+        app_class = str(payload.get("app_class") or "")
+        window_title = str(payload.get("window_title") or payload.get("title") or "")
+        self._active_app_class = app_class
+        self._active_window_title = window_title
+
+        if payload.get("is_call_window") is not None:
+            self._is_call_window = bool(payload["is_call_window"])
+        elif isinstance(payload.get("metadata"), dict) and "is_call_window" in payload["metadata"]:
+            self._is_call_window = bool(payload["metadata"]["is_call_window"])
+        elif app_class or window_title:
+            self._is_call_window = is_call_window(app_class, window_title)
+        else:
+            self._is_call_window = False
+
+        await self.evaluate(now=event_time)
+
+    async def _on_input_idle_changed(self, event: PlatformEvent) -> None:
+        event_time = self._event_now(event)
+        self._last_event_at = event_time
+        payload = event.payload
+        raw_idle = payload.get("idle")
+        if raw_idle is None:
+            raw_idle = payload.get("is_idle")
+        if raw_idle is not None:
+            self._is_idle = bool(raw_idle)
+        await self.evaluate(now=event_time)
+
+    async def _is_in_call_window(self) -> bool:
+        if self._is_call_window:
+            return True
+        if self._db_connected():
+            cur_win = await self.db.get_current_window_span()
+            if cur_win is not None:
+                meta = cur_win.get("metadata")
+                if isinstance(meta, dict) and meta.get("is_call_window") is True:
+                    return True
+                if is_call_window(
+                    str(cur_win.get("app_class") or ""),
+                    str(cur_win.get("window_title") or ""),
+                ):
+                    return True
+        return False
+
     async def _on_recommendation_resolved(self, event: PlatformEvent) -> None:
         event_time = self._event_now(event)
         self._last_event_at = event_time
@@ -477,6 +660,12 @@ class PosturePolicyModule(BaseModule):
         if "dnd_mode" in payload and payload["dnd_mode"] is not None:
             self._dnd_mode = bool(payload["dnd_mode"])
             self._sync_privacy_in_config("dnd_mode", self._dnd_mode)
+
+        if self._privacy_paused:
+            self._is_call_window = False
+            self._is_idle = False
+            self._active_app_class = None
+            self._active_window_title = None
 
     async def _periodic_loop(self) -> None:
         try:
@@ -645,8 +834,15 @@ class PosturePolicyModule(BaseModule):
         current_event: dict[str, Any] | None,
         upcoming_event: dict[str, Any] | None,
         now: datetime,
+        recommended_pomodoro: str | None = None,
     ) -> str:
         base = f"You have been sitting for {elapsed_minutes} minutes."
+        pomo_note = (
+            f" (recommended timer: {recommended_pomodoro.replace('_', '/')})"
+            if recommended_pomodoro
+            else ""
+        )
+
         if current_event is None and upcoming_event is not None:
             title = str(upcoming_event.get("title") or "Next block")
             start_dt = _parse_dt(upcoming_event.get("start_time"))
@@ -656,13 +852,16 @@ class PosturePolicyModule(BaseModule):
             else:
                 prefix = f"{title} is starting soon. {base}"
         elif current_event is not None and current_event.get("title"):
-            prefix = f"{base} Current block: {current_event['title']}."
+            title = str(current_event["title"])
+            prefix = f"You have been sitting for {elapsed_minutes} minutes during {title}."
         else:
             prefix = base
 
         if suggested_action == "walk":
             return f"{prefix} Consider walking for this block."
         if suggested_action == "stand":
+            if recommended_pomodoro:
+                return f"{prefix} Stand for the next part{pomo_note}."
             return f"{prefix} Consider standing up."
         return f"{prefix} Consider standing or walking."
 
