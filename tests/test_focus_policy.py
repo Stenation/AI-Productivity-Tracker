@@ -384,3 +384,4 @@ async def test_focus_policy_privacy_pause_and_registry_e2e_integration(
         finally:
             reader.feed_eof()
             await hypr.stop()
+

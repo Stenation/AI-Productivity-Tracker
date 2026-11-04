@@ -753,3 +753,4 @@ async def test_input_idle_changed_threshold_manual_override_ttl_and_hypridle_con
     reg_bus = EventBus()
     registry = ModuleRegistry(bus=reg_bus, db=db, settings=test_settings)
     assert registry._resolve_category("hyprland_ipc") == "inputs"
+
