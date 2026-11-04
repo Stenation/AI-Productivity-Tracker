@@ -174,9 +174,36 @@ class FocusSettings(BaseModel):
     work_app_classes: list[str] = Field(
         default_factory=lambda: ["code", "Alacritty", "kitty", "obsidian", "Zotero"]
     )
+    distraction_app_classes: list[str] = Field(default_factory=list)
+    neutral_app_classes: list[str] = Field(default_factory=list)
     distraction_title_patterns: list[str] = Field(
         default_factory=lambda: ["YouTube", "Reddit", "Twitch", "Twitter", "X"]
     )
+    work_title_patterns: list[str] = Field(default_factory=list)
+    neutral_title_patterns: list[str] = Field(default_factory=list)
+    call_app_classes: list[str] = Field(
+        default_factory=lambda: [
+            "zoom",
+            "teams",
+            "microsoft teams",
+            "webex",
+        ]
+    )
+    call_title_patterns: list[str] = Field(
+        default_factory=lambda: [
+            "Zoom Meeting",
+            "Zoom Cloud Meetings",
+            "Google Meet",
+            "Meet -",
+            "meet.google.com",
+            "Microsoft Teams",
+            "Teams Meeting",
+            "Discord Voice",
+            "Voice Connected",
+            "Huddle",
+        ]
+    )
+    app_class_rules: dict[str, str] = Field(default_factory=dict)
 
 
 class CalendarClassificationSettings(BaseModel):

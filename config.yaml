@@ -80,6 +80,8 @@ focus:
     - "kitty"
     - "obsidian"
     - "Zotero"
+  distraction_app_classes: []
+  neutral_app_classes: []
   distraction_title_patterns:
     - "YouTube"
     - "Reddit"

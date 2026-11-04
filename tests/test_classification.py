@@ -12,15 +12,23 @@ from jarvis.core.classification import (
     DEFAULT_COLOR_MAPPINGS,
     DEFAULT_POMODORO_MAPPING,
     TaskClassificationResult,
+    WindowClassificationResult,
     apply_classification_to_event,
     classify_calendar_event,
     classify_calendar_event_deterministic,
+    classify_window,
     get_recommended_pomodoro,
+    is_call_window,
     is_suitable_for_walking,
     is_walking_or_audiobook,
 )
 from jarvis.core.schema import CalendarEvent, TaskType
-from jarvis.core.settings import CalendarClassificationSettings, PomodoroSettings, Settings
+from jarvis.core.settings import (
+    CalendarClassificationSettings,
+    FocusSettings,
+    PomodoroSettings,
+    Settings,
+)
 
 
 def _create_event(
@@ -534,3 +542,564 @@ def test_is_walking_or_audiobook_helper() -> None:
     assert is_walking_or_audiobook("walking pad session") is True
     assert is_walking_or_audiobook("sitting at desk reading paper") is False
     assert is_walking_or_audiobook("") is False
+
+
+# ===========================================================================
+# Window focus classification tests (FR-08, FR-09)
+# ===========================================================================
+
+
+# 9. App-class precedence tests
+
+
+def test_app_class_precedence_over_distraction_title_patterns() -> None:
+    # Productive app class beats title containing distraction keywords
+    res1 = classify_window("code", "Reddit - /r/python - Visual Studio Code")
+    assert res1.category == "focused"
+    assert res1.classifier == "app_class"
+    assert res1.confidence == 0.95
+    assert res1.is_call_window is False
+
+    res2 = classify_window("Alacritty", "Lo-Fi Beats - YouTube")
+    assert res2.category == "focused"
+    assert res2.classifier == "app_class"
+
+    res3 = classify_window("kitty", "Twitch chat bot dev")
+    assert res3.category == "focused"
+    assert res3.classifier == "app_class"
+
+    res4 = classify_window("obsidian", "Notes on Twitter / X algorithm")
+    assert res4.category == "focused"
+    assert res4.classifier == "app_class"
+
+    res5 = classify_window("Zotero", "YouTube video bibliography")
+    assert res5.category == "focused"
+    assert res5.classifier == "app_class"
+
+
+def test_app_class_precedence_over_calendar_correlation() -> None:
+    # Even during reading task, productive app-class rules take precedence
+    res = classify_window(
+        "code",
+        "FastAPI Documentation",
+        active_task_type="reading",
+    )
+    assert res.category == "focused"
+    assert res.classifier == "app_class"
+    assert res.confidence == 0.95
+
+
+def test_app_class_case_insensitivity() -> None:
+    assert classify_window("CODE", "main.py").category == "focused"
+    assert classify_window("alacritty", "zsh").category == "focused"
+    assert classify_window("Kitty", "bash").category == "focused"
+    assert classify_window("Obsidian", "Daily Notes").category == "focused"
+    assert classify_window("ZOTERO", "Library").category == "focused"
+
+
+def test_explicit_app_class_rules_top_precedence() -> None:
+    # Custom app_class_rules takes precedence over built-in work/distraction lists
+    rules = {"firefox": "focused", "gimp": "neutral", "custom_game": "distracted"}
+    res_ff = classify_window("firefox", "Reddit - /r/rust", app_class_rules=rules)
+    assert res_ff.category == "focused"
+    assert res_ff.classifier == "app_class"
+    assert res_ff.confidence == 1.0
+
+    res_gimp = classify_window("gimp", "design.png", app_class_rules=rules)
+    assert res_gimp.category == "neutral"
+    assert res_gimp.classifier == "app_class"
+
+    res_game = classify_window("custom_game", "Game window", app_class_rules=rules)
+    assert res_game.category == "distracted"
+    assert res_game.classifier == "app_class"
+
+
+def test_distraction_and_neutral_app_classes() -> None:
+    # Custom distraction and neutral app classes
+    res_dist = classify_window(
+        "steam",
+        "Documentation",
+        distraction_app_classes=["steam"],
+    )
+    assert res_dist.category == "distracted"
+    assert res_dist.classifier == "app_class"
+
+    res_neutral = classify_window(
+        "pavucontrol",
+        "YouTube Volume",
+        neutral_app_classes=["pavucontrol"],
+    )
+    assert res_neutral.category == "neutral"
+    assert res_neutral.classifier == "app_class"
+
+
+# 10. Title-rule precedence tests
+
+
+def test_title_rule_precedence_for_distractions() -> None:
+    # Unclassified browser app with distraction title patterns
+    browser_apps = ["firefox", "google-chrome", "brave", "chromium"]
+    for app in browser_apps:
+        res_yt = classify_window(app, "Lo-Fi Beats - YouTube — Browser")
+        assert res_yt.category == "distracted"
+        assert res_yt.classifier == "title_rule"
+        assert res_yt.confidence == 0.90
+
+        res_reddit = classify_window(app, "Reddit: /r/hyprland — Browser")
+        assert res_reddit.category == "distracted"
+        assert res_reddit.classifier == "title_rule"
+
+        res_twitch = classify_window(app, "Twitch - Live Stream")
+        assert res_twitch.category == "distracted"
+        assert res_twitch.classifier == "title_rule"
+
+        res_twitter = classify_window(app, "Home / Twitter")
+        assert res_twitter.category == "distracted"
+        assert res_twitter.classifier == "title_rule"
+
+        res_x = classify_window(app, "Trending / X — Browser")
+        assert res_x.category == "distracted"
+        assert res_x.classifier == "title_rule"
+
+
+def test_title_rule_boundary_safety_for_short_patterns() -> None:
+    # 'X' pattern must NOT match words containing x like Firefox, Linux, Next.js, Matrix
+    res_firefox = classify_window("firefox", "Arch Linux Wiki — Mozilla Firefox")
+    assert res_firefox.category == "unknown"
+    assert res_firefox.classifier == "default"
+
+    res_matrix = classify_window("firefox", "Matrix Protocol Documentation")
+    assert res_matrix.category == "unknown"
+    assert res_matrix.classifier == "default"
+
+    res_next = classify_window("firefox", "Next.js App Router Guide")
+    assert res_next.category == "unknown"
+    assert res_next.classifier == "default"
+
+    # But 'X' surrounded by non-alphanumeric boundaries MUST match
+    res_x1 = classify_window("firefox", "Home / X")
+    assert res_x1.category == "distracted"
+
+    res_x2 = classify_window("firefox", "Steffen on X: 'Hello World'")
+    assert res_x2.category == "distracted"
+
+
+def test_title_rule_precedence_over_calendar_correlation() -> None:
+    # Title rule beats calendar correlation (e.g. YouTube during reading or coding)
+    res_read = classify_window(
+        "firefox",
+        "YouTube - Tech Conference Talk",
+        active_task_type="reading",
+    )
+    assert res_read.category == "distracted"
+    assert res_read.classifier == "title_rule"
+
+    res_code = classify_window(
+        "firefox",
+        "Reddit - /r/programming Discussion",
+        active_task_type="coding",
+    )
+    assert res_code.category == "distracted"
+    assert res_code.classifier == "title_rule"
+
+
+def test_work_and_neutral_title_patterns() -> None:
+    res_work = classify_window(
+        "firefox",
+        "FastAPI Documentation — Mozilla Firefox",
+        work_title_patterns=["FastAPI Documentation"],
+    )
+    assert res_work.category == "focused"
+    assert res_work.classifier == "title_rule"
+
+    res_neutral = classify_window(
+        "custom_gui",
+        "System Volume Settings",
+        neutral_title_patterns=["System Volume Settings"],
+    )
+    assert res_neutral.category == "neutral"
+    assert res_neutral.classifier == "title_rule"
+
+
+# 11. Call-window detection tests
+
+
+def test_call_window_detection_zoom() -> None:
+    assert is_call_window("zoom", "") is True
+    assert is_call_window("Zoom", "Team Sync") is True
+    assert is_call_window("zoom.real", "Zoom Cloud Meetings") is True
+    assert is_call_window("firefox", "Zoom Meeting - Sprint Review") is True
+
+    res = classify_window("zoom", "Zoom Meeting")
+    assert res.is_call_window is True
+
+
+def test_call_window_detection_google_meet() -> None:
+    assert is_call_window("firefox", "Google Meet — Mozilla Firefox") is True
+    assert is_call_window("chrome", "Meet - abc-defg-hij") is True
+    assert is_call_window("firefox", "https://meet.google.com/xyz-uvw-rst") is True
+    assert is_call_window("google-meet", "Daily Standup") is True
+
+    res = classify_window("firefox", "Meet - abc-defg-hij")
+    assert res.is_call_window is True
+
+
+def test_call_window_detection_microsoft_teams() -> None:
+    assert is_call_window("teams", "Microsoft Teams") is True
+    assert is_call_window("microsoft teams", "General") is True
+    assert is_call_window("ms-teams", "Weekly Sync") is True
+    assert is_call_window("teams-for-linux", "Daily Standup") is True
+    assert is_call_window("firefox", "Teams Meeting | Microsoft Teams") is True
+
+    res = classify_window("teams", "Microsoft Teams")
+    assert res.is_call_window is True
+
+
+def test_call_window_detection_discord_voice() -> None:
+    # Discord voice or active call indicators
+    assert is_call_window("discord", "Discord | Voice Connected") is True
+    assert is_call_window("discord", "Discord Voice - Gaming") is True
+    assert is_call_window("discord", "Incoming Call - Discord") is True
+    assert is_call_window("vesktop", "Voice Channel - Friends") is True
+    assert is_call_window("discord", "• Voice") is True
+    assert is_call_window("discord", "Team Room (Voice)") is True
+
+    # General Discord text chat must NOT be flagged as call window
+    assert is_call_window("discord", "#general - Discord") is False
+    assert is_call_window("discord", "#announcements") is False
+    assert is_call_window("vesktop", "#dev-chat") is False
+
+    res_voice = classify_window("discord", "Discord | Voice Connected")
+    assert res_voice.is_call_window is True
+
+    res_text = classify_window("discord", "#general - Discord")
+    assert res_text.is_call_window is False
+
+
+def test_call_window_detection_slack_huddles() -> None:
+    # Slack huddle indicators
+    assert is_call_window("slack", "Slack | Huddle") is True
+    assert is_call_window("slack", "Dev Huddle") is True
+    assert is_call_window("slack", "Slack Huddle with Alice") is True
+    assert is_call_window("slack", "Team Call") is False
+    assert is_call_window("slack", "Huddle") is True
+
+    # General Slack text chat must NOT be flagged as call window
+    assert is_call_window("slack", "#general - Slack") is False
+    assert is_call_window("slack", "project-roadmap") is False
+
+    res_huddle = classify_window("slack", "Slack | Huddle")
+    assert res_huddle.is_call_window is True
+
+    res_text = classify_window("slack", "#general - Slack")
+    assert res_text.is_call_window is False
+
+
+def test_non_call_windows() -> None:
+    assert is_call_window("code", "main.py - Visual Studio Code") is False
+    assert is_call_window("Alacritty", "zsh") is False
+    assert is_call_window("firefox", "Arch Linux Wiki — Mozilla Firefox") is False
+    assert is_call_window("firefox", "Wikipedia: Alan Turing") is False
+    assert is_call_window("", "") is False
+
+
+# 12. Calendar correlation tests
+
+
+def test_calendar_correlation_reading_docs() -> None:
+    # Browser documentation during reading task correlates to focused
+    res_docs = classify_window(
+        "firefox",
+        "Python 3.12 Documentation",
+        active_task_type="reading",
+    )
+    assert res_docs.category == "focused"
+    assert res_docs.classifier == "calendar_correlation"
+    assert res_docs.confidence == 0.80
+
+    res_wiki = classify_window(
+        "firefox",
+        "Arch Linux Wiki — Mozilla Firefox",
+        active_task_type="reading",
+    )
+    assert res_wiki.category == "focused"
+    assert res_wiki.classifier == "calendar_correlation"
+
+    res_book = classify_window(
+        "firefox",
+        "Designing Data-Intensive Applications - Book Chapter 3",
+        active_task_type="reading",
+    )
+    assert res_book.category == "focused"
+    assert res_book.classifier == "calendar_correlation"
+
+    res_pdf = classify_window(
+        "evince",
+        "Raft Consensus Algorithm Paper.pdf",
+        active_task_type="reading",
+    )
+    assert res_pdf.category == "focused"
+    assert res_pdf.classifier == "calendar_correlation"
+
+
+def test_calendar_correlation_coding_docs_and_repos() -> None:
+    # Browser technical docs / repositories during coding task
+    res_github = classify_window(
+        "firefox",
+        "GitHub - owner/repo: Pull Request #404",
+        active_task_type="coding",
+    )
+    assert res_github.category == "focused"
+    assert res_github.classifier == "calendar_correlation"
+    assert res_github.confidence == 0.80
+
+    res_so = classify_window(
+        "firefox",
+        "Stack Overflow: How to use asyncio subprocess in Python",
+        active_task_type="coding",
+    )
+    assert res_so.category == "focused"
+    assert res_so.classifier == "calendar_correlation"
+
+    res_crates = classify_window(
+        "firefox",
+        "crates.io: tokio - Rust async runtime",
+        active_task_type="coding",
+    )
+    assert res_crates.category == "focused"
+    assert res_crates.classifier == "calendar_correlation"
+
+
+def test_calendar_correlation_deep_work() -> None:
+    # Deep work: media / entertainment correlates to distracted
+    res_music = classify_window(
+        "firefox",
+        "Podcast: Software Engineering Daily",
+        active_task_type="deep_work",
+    )
+    assert res_music.category == "distracted"
+    assert res_music.classifier == "calendar_correlation"
+    assert res_music.confidence == 0.85
+
+    res_video = classify_window(
+        "custom_player",
+        "Funny Stream Video",
+        active_task_type="deep_work",
+    )
+    assert res_video.category == "distracted"
+    assert res_video.classifier == "calendar_correlation"
+
+    # Deep work: research papers correlate to focused
+    res_research = classify_window(
+        "firefox",
+        "Raft Consensus Research Paper",
+        active_task_type="deep_work",
+    )
+    assert res_research.category == "focused"
+    assert res_research.classifier == "calendar_correlation"
+
+    # Deep work: ambiguous non-match falls back to unknown
+    res_ambiguous = classify_window(
+        "firefox",
+        "Online Shopping Store",
+        active_task_type="deep_work",
+    )
+    assert res_ambiguous.category == "unknown"
+    assert res_ambiguous.classifier == "default"
+
+
+def test_calendar_correlation_meeting() -> None:
+    # Meeting task: call windows correlate to focused
+    res_zoom = classify_window(
+        "zoom",
+        "Zoom Meeting - Weekly Standup",
+        active_task_type="meeting",
+    )
+    assert res_zoom.category == "focused"
+    assert res_zoom.classifier == "calendar_correlation"
+    assert res_zoom.is_call_window is True
+
+    res_meet = classify_window(
+        "firefox",
+        "Google Meet — Mozilla Firefox",
+        active_task_type="meeting",
+    )
+    assert res_meet.category == "focused"
+    assert res_meet.classifier == "calendar_correlation"
+    assert res_meet.is_call_window is True
+
+    # Meeting notes correlate to focused
+    res_notes = classify_window(
+        "firefox",
+        "Sprint 42 Retrospective Notes",
+        active_task_type="meeting",
+    )
+    assert res_notes.category == "focused"
+    assert res_notes.classifier == "calendar_correlation"
+
+    # General background browser during meeting correlates to neutral
+    res_general = classify_window(
+        "firefox",
+        "Company Intranet Portal",
+        active_task_type="meeting",
+    )
+    assert res_general.category == "neutral"
+    assert res_general.classifier == "calendar_correlation"
+
+
+def test_calendar_correlation_break() -> None:
+    # Break task correlates general activity to neutral
+    res_break1 = classify_window(
+        "mpv",
+        "Stretch and Relax Video",
+        active_task_type="break",
+    )
+    assert res_break1.category == "neutral"
+    assert res_break1.classifier == "calendar_correlation"
+
+    res_break2 = classify_window(
+        "firefox",
+        "Cooking Recipes",
+        active_task_type="break",
+    )
+    assert res_break2.category == "neutral"
+    assert res_break2.classifier == "calendar_correlation"
+
+
+def test_calendar_correlation_email_admin_planning() -> None:
+    # Email task
+    res_mail = classify_window(
+        "firefox",
+        "Gmail - Inbox (12)",
+        active_task_type="email",
+    )
+    assert res_mail.category == "focused"
+    assert res_mail.classifier == "calendar_correlation"
+
+    # Admin task
+    res_admin = classify_window(
+        "firefox",
+        "HR Timesheet and Expense Report - Portal",
+        active_task_type="admin",
+    )
+    assert res_admin.category == "focused"
+    assert res_admin.classifier == "calendar_correlation"
+
+    # Planning task
+    res_plan = classify_window(
+        "firefox",
+        "Q2 Roadmap and Backlog Prioritization - Jira",
+        active_task_type="planning",
+    )
+    assert res_plan.category == "focused"
+    assert res_plan.classifier == "calendar_correlation"
+
+
+def test_calendar_correlation_conservative_fallback_to_unknown() -> None:
+    # During reading, an unrelated store page must NOT be guessed as focused
+    res_read = classify_window(
+        "firefox",
+        "Amazon.com: Electronics Store",
+        active_task_type="reading",
+    )
+    assert res_read.category == "unknown"
+    assert res_read.classifier == "default"
+
+    # During coding, an unrelated real-estate page must NOT be guessed as focused
+    res_code = classify_window(
+        "firefox",
+        "Apartments for Rent",
+        active_task_type="coding",
+    )
+    assert res_code.category == "unknown"
+    assert res_code.classifier == "default"
+
+
+# 13. Unknown fallback and desktop tests
+
+
+def test_unknown_fallback_for_unmatched_inputs() -> None:
+    res = classify_window("firefox", "Random Blog Article")
+    assert res.category == "unknown"
+    assert res.classifier == "default"
+    assert res.confidence == 0.0
+    assert res.is_call_window is False
+
+    res_app = classify_window("calculator", "Calculator")
+    assert res_app.category == "unknown"
+    assert res_app.classifier == "default"
+    assert res_app.confidence == 0.0
+
+
+def test_empty_window_and_desktop_fallback() -> None:
+    res_empty = classify_window("", "")
+    assert res_empty.category == "neutral"
+    assert res_empty.classifier == "desktop"
+    assert res_empty.confidence == 1.0
+    assert res_empty.is_call_window is False
+
+    res_spaces = classify_window("   ", "   ")
+    assert res_spaces.category == "neutral"
+    assert res_spaces.classifier == "desktop"
+
+
+# 14. Deterministic behavior and result model tests
+
+
+def test_deterministic_behavior_for_identical_inputs() -> None:
+    # Repeated calls must return identical results
+    test_cases = [
+        ("code", "main.py", "coding"),
+        ("firefox", "Reddit - /r/rust", "reading"),
+        ("firefox", "FastAPI Docs", "reading"),
+        ("zoom", "Zoom Meeting", "meeting"),
+        ("firefox", "Meet - abc-defg-hij", "meeting"),
+        ("slack", "Dev Huddle", None),
+        ("discord", "#general", None),
+        ("firefox", "Random Page", None),
+        ("", "", None),
+    ]
+
+    for app_class, title, task_type in test_cases:
+        r1 = classify_window(app_class, title, active_task_type=task_type)
+        r2 = classify_window(app_class, title, active_task_type=task_type)
+        assert r1.category == r2.category
+        assert r1.classifier == r2.classifier
+        assert r1.is_call_window == r2.is_call_window
+        assert r1.confidence == r2.confidence
+
+
+def test_classify_window_via_settings_object() -> None:
+    custom_settings = Settings(
+        focus=FocusSettings(
+            work_app_classes=["custom_ide"],
+            distraction_title_patterns=["DistractingSite"],
+        )
+    )
+    res_ide = classify_window("custom_ide", "main.rs", settings=custom_settings)
+    assert res_ide.category == "focused"
+    assert res_ide.classifier == "app_class"
+
+    res_dist = classify_window("firefox", "DistractingSite - Home", settings=custom_settings)
+    assert res_dist.category == "distracted"
+    assert res_dist.classifier == "title_rule"
+
+
+def test_window_classification_result_dict_access() -> None:
+    res = WindowClassificationResult(
+        category="focused",
+        classifier="app_class",
+        is_call_window=False,
+        confidence=0.95,
+    )
+    assert res["category"] == "focused"
+    assert res["classifier"] == "app_class"
+    assert res["is_call_window"] is False
+    assert res["confidence"] == 0.95
+    assert res.get("category") == "focused"
+    assert res.get("non_existent", "fallback") == "fallback"
+    assert "category" in res
+    assert "is_call_window" in res
+
+    with pytest.raises(KeyError):
+        _ = res["non_existent_key"]

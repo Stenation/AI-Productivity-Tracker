@@ -17,7 +17,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from jarvis.core.schema import CalendarEvent, TaskType, now_local
+from jarvis.core.schema import CalendarEvent, FocusState, TaskType, now_local
 
 logger = logging.getLogger(__name__)
 
@@ -643,3 +643,520 @@ def apply_classification_to_event(
     event.suitable_for_walking = result.suitable_for_walking
     event.recommended_pomodoro = result.recommended_pomodoro
     return event
+
+
+# ---------------------------------------------------------------------------
+# Window focus classification (FR-08, FR-09)
+# ---------------------------------------------------------------------------
+
+VALID_FOCUS_CATEGORIES: frozenset[FocusState] = frozenset({
+    "focused",
+    "neutral",
+    "distracted",
+    "unknown",
+})
+
+DEFAULT_WORK_APP_CLASSES: tuple[str, ...] = (
+    "code",
+    "Alacritty",
+    "kitty",
+    "obsidian",
+    "Zotero",
+)
+
+DEFAULT_DISTRACTION_APP_CLASSES: tuple[str, ...] = ()
+
+DEFAULT_NEUTRAL_APP_CLASSES: tuple[str, ...] = ()
+
+DEFAULT_DISTRACTION_TITLE_PATTERNS: tuple[str, ...] = (
+    "YouTube",
+    "Reddit",
+    "Twitch",
+    "Twitter",
+    "X",
+)
+
+DEFAULT_CALL_APP_CLASSES: tuple[str, ...] = (
+    "zoom",
+    "zoom.real",
+    "zoommtg",
+    "teams",
+    "microsoft teams",
+    "ms-teams",
+    "teams-for-linux",
+    "com.microsoft.teams",
+    "webex",
+    "cisco webex",
+    "google-meet",
+)
+
+DEFAULT_CALL_TITLE_PATTERNS: tuple[str, ...] = (
+    "Zoom Meeting",
+    "Zoom Cloud Meetings",
+    "Google Meet",
+    "Meet -",
+    "meet.google.com",
+    "Microsoft Teams",
+    "Teams Meeting",
+    "Discord Voice",
+    "Voice Connected",
+    "Huddle",
+)
+
+_READING_CORRELATION_REGEX: Pattern[str] = re.compile(
+    r"(?i)\b(docs|documentation|wiki|paper|papers|spec|specs|specification|specifications|"
+    r"book|books|article|articles|rfc|guide|guides|manual|manuals|tutorial|tutorials|"
+    r"arxiv|read|reading|chapter|reference)\b"
+)
+
+_CODING_CORRELATION_REGEX: Pattern[str] = re.compile(
+    r"(?i)\b(docs|documentation|wiki|github|gitlab|pull\s*request|pr\s*#|commit|diff|"
+    r"stackoverflow|stack\s*overflow|crates\.io|pypi|npmjs|devdocs|api(\s+reference)?|"
+    r"debugger|godoc|arch\s*linux\s*wiki|sourcegraph|code\s*review)\b"
+)
+
+_DEEP_WORK_DISTRACTION_REGEX: Pattern[str] = re.compile(
+    r"(?i)\b(youtube|twitch|reddit|twitter|x|netflix|spotify|tiktok|instagram|facebook|"
+    r"steam|game|games|gaming|video|videos|stream|streams|music|podcast|podcasts)\b"
+)
+
+_DEEP_WORK_FOCUSED_REGEX: Pattern[str] = re.compile(
+    r"(?i)\b(paper|papers|thesis|research|study|studying|deep\s*work|focus|docs|documentation|spec|specs)\b"
+)
+
+_MEETING_CORRELATION_REGEX: Pattern[str] = re.compile(
+    r"(?i)\b(meeting|agenda|minutes|notes|sync|standup|1:1|one-on-one|interview|retro|retrospective|huddle|call)\b"
+)
+
+_EMAIL_CORRELATION_REGEX: Pattern[str] = re.compile(
+    r"(?i)\b(email|emails|gmail|outlook|thunderbird|mail|inbox|fastmail|protonmail)\b"
+)
+
+_ADMIN_CORRELATION_REGEX: Pattern[str] = re.compile(
+    r"(?i)\b(admin|administration|expense|expenses|invoice|invoices|timesheet|timesheets|"
+    r"jira|linear|confluence|notion|hr|portal|paperwork|compliance)\b"
+)
+
+_PLANNING_CORRELATION_REGEX: Pattern[str] = re.compile(
+    r"(?i)\b(planning|plan|roadmap|backlog|sprint|jira|linear|trello|asana|board|prioritization|okr|review)\b"
+)
+
+
+class WindowClassificationResult(BaseModel):
+    """Result of window focus classification (FR-08, FR-09)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    category: FocusState = "unknown"
+    classifier: str = "default"
+    is_call_window: bool = False
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    timestamp: datetime = Field(default_factory=now_local)
+
+    def __getitem__(self, item: str) -> Any:
+        try:
+            return getattr(self, item)
+        except AttributeError as exc:
+            raise KeyError(item) from exc
+
+    def get(self, item: str, default: Any = None) -> Any:
+        return getattr(self, item, default)
+
+    def __contains__(self, item: object) -> bool:
+        return isinstance(item, str) and item in type(self).model_fields
+
+
+def _title_matches_pattern(window_title: str, pattern: str) -> bool:
+    """Check if window_title matches pattern with word boundaries for short tokens like 'X'."""
+    cleaned = pattern.strip()
+    if not cleaned or not window_title:
+        return False
+    if len(cleaned) <= 2:
+        token_re = rf"(?<![A-Za-z0-9]){re.escape(cleaned)}(?![A-Za-z0-9])"
+        return bool(re.search(token_re, window_title, re.IGNORECASE))
+    return cleaned.lower() in window_title.lower()
+
+
+def is_call_window(
+    app_class: str,
+    window_title: str,
+    *,
+    call_app_classes: Sequence[str] | None = None,
+    call_title_patterns: Sequence[str] | None = None,
+) -> bool:
+    """Return True if the window belongs to a known call or meeting interface.
+
+    Detects common call windows such as Zoom, Google Meet, Microsoft Teams,
+    Discord voice, and Slack huddles.
+    """
+    clean_class = str(app_class).strip().lower() if app_class is not None else ""
+    clean_title = str(window_title).strip() if window_title is not None else ""
+    lowered_title = clean_title.lower()
+
+    if not clean_class and not clean_title:
+        return False
+
+    # 1. Zoom
+    if clean_class in {"zoom", "zoom.real", "zoommtg"}:
+        return True
+    if re.search(r"(?i)\bzoom(\s+(meeting|cloud\s+meetings))?\b", clean_title):
+        return True
+
+    # 2. Google Meet
+    if clean_class in {"google-meet", "meet"}:
+        return True
+    if "google meet" in lowered_title or "meet.google.com" in lowered_title:
+        return True
+    if re.search(r"(?i)\bmeet\s*-\s*[a-z0-9\-]+", clean_title):
+        return True
+
+    # 3. Microsoft Teams
+    if clean_class in {
+        "teams",
+        "microsoft teams",
+        "ms-teams",
+        "teams-for-linux",
+        "com.microsoft.teams",
+    }:
+        return True
+    if "microsoft teams" in lowered_title or "teams meeting" in lowered_title:
+        return True
+
+    # 4. Discord voice (explicitly voice/call indicator, not general chat)
+    is_discord_app = (
+        clean_class in {"discord", "vesktop", "discord-canary", "discord-ptb"}
+        or "discord" in lowered_title
+    )
+    if is_discord_app:
+        if (
+            re.search(r"(?i)\b(voice(\s+connected|\s+channel)?|call)\b", clean_title)
+            or "• voice" in lowered_title
+            or "[voice]" in lowered_title
+            or "(voice)" in lowered_title
+        ):
+            return True
+
+    # 5. Slack huddles (explicitly huddles, not general chat)
+    is_slack_app = clean_class == "slack" or "slack" in lowered_title
+    if is_slack_app:
+        if re.search(r"(?i)\bhuddle\b", clean_title):
+            return True
+
+    # 6. Webex / Jitsi
+    if (
+        clean_class in {"webex", "cisco webex"}
+        or "webex meeting" in lowered_title
+        or "jitsi meet" in lowered_title
+        or "meet.jit.si" in lowered_title
+    ):
+        return True
+
+    # 7. Configured patterns
+    if call_app_classes:
+        for c in call_app_classes:
+            c_str = str(c).strip().lower()
+            if c_str and clean_class == c_str:
+                return True
+    if call_title_patterns:
+        for p in call_title_patterns:
+            if _title_matches_pattern(clean_title, str(p)):
+                return True
+
+    return False
+
+
+def _correlate_calendar_task(
+    clean_class: str,
+    clean_title: str,
+    active_task_type: str,
+    *,
+    is_call: bool,
+) -> tuple[FocusState, float] | None:
+    """Conservatively correlate an active calendar task type with the window."""
+    norm_task = active_task_type.strip().lower()
+
+    if norm_task == "reading":
+        if _READING_CORRELATION_REGEX.search(clean_title) or clean_class.lower() in {
+            "evince",
+            "okular",
+            "zathura",
+            "calibre",
+        }:
+            return ("focused", 0.80)
+        return None
+
+    if norm_task == "coding":
+        if _CODING_CORRELATION_REGEX.search(clean_title):
+            return ("focused", 0.80)
+        return None
+
+    if norm_task == "deep_work":
+        if _DEEP_WORK_DISTRACTION_REGEX.search(clean_title):
+            return ("distracted", 0.85)
+        if _DEEP_WORK_FOCUSED_REGEX.search(clean_title):
+            return ("focused", 0.80)
+        return None
+
+    if norm_task == "meeting":
+        if is_call or _MEETING_CORRELATION_REGEX.search(clean_title):
+            return ("focused", 0.85)
+        return ("neutral", 0.70)
+
+    if norm_task == "break":
+        return ("neutral", 0.80)
+
+    if norm_task == "email":
+        if _EMAIL_CORRELATION_REGEX.search(clean_title):
+            return ("focused", 0.80)
+        return None
+
+    if norm_task == "admin":
+        if _ADMIN_CORRELATION_REGEX.search(clean_title):
+            return ("focused", 0.80)
+        return None
+
+    if norm_task == "planning":
+        if _PLANNING_CORRELATION_REGEX.search(clean_title):
+            return ("focused", 0.80)
+        return None
+
+    return None
+
+
+def classify_window(
+    app_class: str,
+    window_title: str,
+    *,
+    active_task_type: str | None = None,
+    settings: Any | None = None,
+    calendar_task_type: str | None = None,
+    work_app_classes: Sequence[str] | None = None,
+    distraction_app_classes: Sequence[str] | None = None,
+    neutral_app_classes: Sequence[str] | None = None,
+    distraction_title_patterns: Sequence[str] | None = None,
+    work_title_patterns: Sequence[str] | None = None,
+    neutral_title_patterns: Sequence[str] | None = None,
+    call_app_classes: Sequence[str] | None = None,
+    call_title_patterns: Sequence[str] | None = None,
+    app_class_rules: Mapping[str, str] | None = None,
+) -> WindowClassificationResult:
+    """Deterministically classify a window focus state (FR-08, FR-09.1).
+
+    Classification precedence:
+    1. App-class rules.
+    2. Window-title rules.
+    3. Active calendar task-type correlation.
+    4. 'unknown' default.
+
+    Focus categories:
+    - focused
+    - neutral
+    - distracted
+    - unknown
+    """
+    clean_class = str(app_class).strip() if app_class is not None else ""
+    clean_title = str(window_title).strip() if window_title is not None else ""
+
+    effective_task_type = (
+        active_task_type or calendar_task_type or ""
+    ).strip().lower() or None
+
+    # Resolve settings configuration
+    focus_cfg = None
+    if settings is not None:
+        if hasattr(settings, "focus"):
+            focus_cfg = settings.focus
+        else:
+            focus_cfg = settings
+
+    def _get_cfg(field_name: str, default: Any) -> Any:
+        if focus_cfg is not None:
+            if hasattr(focus_cfg, field_name):
+                val = getattr(focus_cfg, field_name)
+                if val is not None:
+                    return val
+            elif isinstance(focus_cfg, Mapping) and field_name in focus_cfg:
+                val = focus_cfg[field_name]
+                if val is not None:
+                    return val
+        return default
+
+    resolved_work_apps = (
+        work_app_classes
+        if work_app_classes is not None
+        else _get_cfg("work_app_classes", DEFAULT_WORK_APP_CLASSES)
+    )
+    resolved_distraction_apps = (
+        distraction_app_classes
+        if distraction_app_classes is not None
+        else _get_cfg("distraction_app_classes", DEFAULT_DISTRACTION_APP_CLASSES)
+    )
+    resolved_neutral_apps = (
+        neutral_app_classes
+        if neutral_app_classes is not None
+        else _get_cfg("neutral_app_classes", DEFAULT_NEUTRAL_APP_CLASSES)
+    )
+    resolved_distraction_titles = (
+        distraction_title_patterns
+        if distraction_title_patterns is not None
+        else _get_cfg("distraction_title_patterns", DEFAULT_DISTRACTION_TITLE_PATTERNS)
+    )
+    resolved_work_titles = (
+        work_title_patterns
+        if work_title_patterns is not None
+        else _get_cfg("work_title_patterns", ())
+    )
+    resolved_neutral_titles = (
+        neutral_title_patterns
+        if neutral_title_patterns is not None
+        else _get_cfg("neutral_title_patterns", ())
+    )
+    resolved_call_apps = (
+        call_app_classes
+        if call_app_classes is not None
+        else _get_cfg("call_app_classes", DEFAULT_CALL_APP_CLASSES)
+    )
+    resolved_call_titles = (
+        call_title_patterns
+        if call_title_patterns is not None
+        else _get_cfg("call_title_patterns", DEFAULT_CALL_TITLE_PATTERNS)
+    )
+    resolved_app_rules = (
+        app_class_rules
+        if app_class_rules is not None
+        else _get_cfg("app_class_rules", {})
+    )
+
+    # Call-window detection
+    call_detected = is_call_window(
+        clean_class,
+        clean_title,
+        call_app_classes=resolved_call_apps,
+        call_title_patterns=resolved_call_titles,
+    )
+
+    # Empty window / desktop
+    if not clean_class and not clean_title:
+        return WindowClassificationResult(
+            category="neutral",
+            classifier="desktop",
+            is_call_window=False,
+            confidence=1.0,
+        )
+
+    # Precedence 1: App-class rules
+    if clean_class:
+        lowered_class = clean_class.lower()
+
+        # 1a. Explicit app-class mappings
+        if resolved_app_rules and lowered_class in resolved_app_rules:
+            mapped_cat = str(resolved_app_rules[lowered_class]).strip().lower()
+            if mapped_cat in VALID_FOCUS_CATEGORIES and mapped_cat != "unknown":
+                return WindowClassificationResult(
+                    category=mapped_cat,  # type: ignore[arg-type]
+                    classifier="app_class",
+                    is_call_window=call_detected,
+                    confidence=1.0,
+                )
+
+        # 1b. Productive / work app classes
+        if resolved_work_apps and any(
+            lowered_class == str(c).strip().lower()
+            for c in resolved_work_apps
+            if str(c).strip()
+        ):
+            return WindowClassificationResult(
+                category="focused",
+                classifier="app_class",
+                is_call_window=call_detected,
+                confidence=0.95,
+            )
+
+        # 1c. Distraction app classes
+        if resolved_distraction_apps and any(
+            lowered_class == str(c).strip().lower()
+            for c in resolved_distraction_apps
+            if str(c).strip()
+        ):
+            return WindowClassificationResult(
+                category="distracted",
+                classifier="app_class",
+                is_call_window=call_detected,
+                confidence=0.95,
+            )
+
+        # 1d. Neutral app classes
+        if resolved_neutral_apps and any(
+            lowered_class == str(c).strip().lower()
+            for c in resolved_neutral_apps
+            if str(c).strip()
+        ):
+            return WindowClassificationResult(
+                category="neutral",
+                classifier="app_class",
+                is_call_window=call_detected,
+                confidence=0.90,
+            )
+
+    # Precedence 2: Window-title rules
+    if clean_title:
+        if resolved_distraction_titles and any(
+            _title_matches_pattern(clean_title, str(p))
+            for p in resolved_distraction_titles
+            if str(p).strip()
+        ):
+            return WindowClassificationResult(
+                category="distracted",
+                classifier="title_rule",
+                is_call_window=call_detected,
+                confidence=0.90,
+            )
+
+        if resolved_work_titles and any(
+            _title_matches_pattern(clean_title, str(p))
+            for p in resolved_work_titles
+            if str(p).strip()
+        ):
+            return WindowClassificationResult(
+                category="focused",
+                classifier="title_rule",
+                is_call_window=call_detected,
+                confidence=0.90,
+            )
+
+        if resolved_neutral_titles and any(
+            _title_matches_pattern(clean_title, str(p))
+            for p in resolved_neutral_titles
+            if str(p).strip()
+        ):
+            return WindowClassificationResult(
+                category="neutral",
+                classifier="title_rule",
+                is_call_window=call_detected,
+                confidence=0.85,
+            )
+
+    # Precedence 3: Active calendar task-type correlation
+    if effective_task_type and effective_task_type != "unknown":
+        correlation = _correlate_calendar_task(
+            clean_class,
+            clean_title,
+            effective_task_type,
+            is_call=call_detected,
+        )
+        if correlation is not None:
+            cor_cat, cor_conf = correlation
+            return WindowClassificationResult(
+                category=cor_cat,
+                classifier="calendar_correlation",
+                is_call_window=call_detected,
+                confidence=cor_conf,
+            )
+
+    # Precedence 4: unknown default
+    return WindowClassificationResult(
+        category="unknown",
+        classifier="default",
+        is_call_window=call_detected,
+        confidence=0.0,
+    )
