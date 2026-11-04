@@ -1,0 +1,55 @@
+<div class="card-header">
+  <h2 class="card-title">Calendar Context Preview</h2>
+  <span class="badge badge-neutral">Read-Only Cache</span>
+</div>
+
+<div class="event-box">
+  <span class="meta-label">Current Block</span>
+  {% if calendar.current_event %}
+    <div class="rec-header">
+      <strong>{{ calendar.current_event.title }}</strong>
+      <span class="mono muted">{{ calendar.current_event.time_window }}</span>
+    </div>
+    <div class="btn-row">
+      <span class="badge badge-info">{{ calendar.current_event.task_label }}</span>
+      {% if calendar.current_event.walking_suitable %}
+        <span class="badge badge-ok">Walking Suitable</span>
+      {% else %}
+        <span class="badge badge-neutral">Desk Recommended</span>
+      {% endif %}
+      {% if calendar.current_event.recommended_pomodoro %}
+        <span class="badge badge-purple">Pomodoro {{ calendar.current_event.recommended_pomodoro }}</span>
+      {% endif %}
+    </div>
+  {% else %}
+    <span class="muted">No active calendar block right now.</span>
+  {% endif %}
+</div>
+
+<div class="event-box">
+  <span class="meta-label">Upcoming Block</span>
+  {% if calendar.next_event %}
+    <div class="rec-header">
+      <strong>{{ calendar.next_event.title }}</strong>
+      <span class="mono muted">
+        {% if calendar.next_event.starts_in_minutes is not none %}
+          in {{ calendar.next_event.starts_in_minutes }}m ·
+        {% endif %}
+        {{ calendar.next_event.time_window }}
+      </span>
+    </div>
+    <div class="btn-row">
+      <span class="badge badge-info">{{ calendar.next_event.task_label }}</span>
+      {% if calendar.next_event.walking_suitable %}
+        <span class="badge badge-ok">Walking Suitable</span>
+      {% else %}
+        <span class="badge badge-neutral">Desk Recommended</span>
+      {% endif %}
+      {% if calendar.next_event.recommended_pomodoro %}
+        <span class="badge badge-purple">Pomodoro {{ calendar.next_event.recommended_pomodoro }}</span>
+      {% endif %}
+    </div>
+  {% else %}
+    <span class="muted">No upcoming calendar events cached.</span>
+  {% endif %}
+</div>

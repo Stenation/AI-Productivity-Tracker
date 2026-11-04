@@ -41,10 +41,27 @@ def test_default_config_yaml_parsing_and_privacy_defaults() -> None:
     assert settings.migrations_dir == PROJECT_ROOT / "migrations"
     assert settings.migrations_dir.is_dir()
 
-    # Modules remain empty until Session 3
-    assert settings.enabled_modules.inputs == []
-    assert settings.enabled_modules.policies == []
-    assert settings.enabled_modules.outputs == []
+    # Milestone 1 default modules enabled in Session 3
+    assert settings.enabled_modules.inputs == ["manual_control"]
+    assert settings.enabled_modules.policies == [
+        "posture_policy",
+        "pomodoro_policy",
+        "meeting_policy",
+    ]
+    assert settings.enabled_modules.outputs == [
+        "waybar_status",
+        "desktop_notify",
+    ]
+
+    # Output module settings defaults
+    assert settings.waybar.status_file == Path("/dev/shm/posture_waybar.json")
+    assert settings.waybar.refresh_interval_seconds == 15.0
+    assert settings.waybar.signal_waybar is True
+    assert settings.waybar.waybar_signal == 8
+    assert settings.desktop_notify.notify_binary == "notify-send"
+    assert settings.desktop_notify.app_name == "Posture Platform"
+    assert settings.desktop_notify.urgency == "normal"
+    assert settings.desktop_notify.expire_time_ms is None
 
     # Privacy-safe defaults (SPEC.MD §7)
     assert settings.privacy.global_pause is False

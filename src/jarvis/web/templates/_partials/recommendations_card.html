@@ -1,0 +1,60 @@
+<div class="card-header">
+  <h2 class="card-title">Pending Recommendations</h2>
+  <span class="badge {% if pending_count > 0 %}badge-warn{% else %}badge-neutral{% endif %}">
+    {{ pending_count }} pending
+  </span>
+</div>
+
+{% if flash_message %}
+  <div class="flash-banner" role="status">{{ flash_message }}</div>
+{% endif %}
+
+{% if recommendations %}
+  <ul class="rec-list">
+    {% for rec in recommendations %}
+      <li class="rec-item" data-rec-id="{{ rec.id }}" data-dedupe-key="{{ rec.dedupe_key or '' }}">
+        <div class="rec-header">
+          <div class="btn-row">
+            <span class="badge badge-info">{{ rec.policy_label }}</span>
+            {% if rec.action_label %}
+              <span class="badge badge-neutral">{{ rec.action_label }}</span>
+            {% endif %}
+            {% if rec.dedupe_key %}
+              <span class="badge badge-neutral mono">{{ rec.dedupe_key }}</span>
+            {% endif %}
+          </div>
+          <span class="muted mono">{{ rec.created_hm }}</span>
+        </div>
+        <div>{{ rec.message }}</div>
+        <div class="btn-row">
+          <button type="button"
+                  class="btn-success btn-sm"
+                  hx-post="/api/recommendations/{{ rec.id }}/accept"
+                  hx-target="#recommendations-panel"
+                  hx-swap="innerHTML">
+            Accept
+          </button>
+          <button type="button"
+                  class="btn-warn btn-sm"
+                  hx-post="/api/recommendations/{{ rec.id }}/snooze"
+                  hx-vals='{"snooze_minutes": 15}'
+                  hx-target="#recommendations-panel"
+                  hx-swap="innerHTML">
+            Snooze
+          </button>
+          <button type="button"
+                  class="btn-sm"
+                  hx-post="/api/recommendations/{{ rec.id }}/dismiss"
+                  hx-target="#recommendations-panel"
+                  hx-swap="innerHTML">
+            Dismiss
+          </button>
+        </div>
+      </li>
+    {% endfor %}
+  </ul>
+{% else %}
+  <div class="empty-state">
+    No pending recommendations. Policy suggestions are strictly non-destructive and never auto-start timers or edit events.
+  </div>
+{% endif %}

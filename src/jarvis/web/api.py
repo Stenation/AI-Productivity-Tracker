@@ -9,6 +9,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from jarvis.core.bus import EventBus
@@ -29,6 +30,15 @@ from jarvis.core.schema import (
 from jarvis.core.settings import Settings
 from jarvis.core.timer import TimerManager
 from jarvis.modules.inputs.manual_control import ManualControlModule
+from jarvis.web.views import (
+    build_modules_context,
+    build_posture_context,
+    build_privacy_context,
+    build_recommendations_context,
+    build_timer_context,
+    is_htmx_request,
+    render_template,
+)
 
 router = APIRouter(prefix="/api", tags=["api"])
 
@@ -423,11 +433,11 @@ async def get_state(request: Request) -> dict[str, Any]:
     }
 
 
-@router.post("/activity")
+@router.post("/activity", response_model=None)
 async def set_activity(
     request: Request,
     payload: _SetActivityDep,
-) -> dict[str, Any]:
+) -> HTMLResponse | dict[str, Any]:
     """Set manual activity state with optional TTL override."""
     manual_control = _get_manual_control(request)
     resolver = _get_resolver(request)
@@ -436,6 +446,15 @@ async def set_activity(
         activity=payload.activity,
         ttl_minutes=payload.ttl_minutes,
     )
+    if is_htmx_request(request):
+        context = await build_posture_context(request)
+        return render_template(
+            request,
+            "_partials/posture_card.html",
+            context,
+            headers={"HX-Trigger": "activityChanged"},
+        )
+
     effective = resolver.get_effective_state()
     return {
         "status": "ok",
@@ -454,11 +473,11 @@ async def set_activity(
     }
 
 
-@router.post("/activity/cycle")
+@router.post("/activity/cycle", response_model=None)
 async def cycle_activity(
     request: Request,
     payload: _CycleActivityDep,
-) -> dict[str, Any]:
+) -> HTMLResponse | dict[str, Any]:
     """Cycle manual activity state (`sitting -> standing -> walking -> away`)."""
     manual_control = _get_manual_control(request)
     resolver = _get_resolver(request)
@@ -468,6 +487,15 @@ async def cycle_activity(
         current_activity=previous_activity,
         ttl_minutes=payload.ttl_minutes,
     )
+    if is_htmx_request(request):
+        context = await build_posture_context(request)
+        return render_template(
+            request,
+            "_partials/posture_card.html",
+            context,
+            headers={"HX-Trigger": "activityChanged"},
+        )
+
     effective = resolver.get_effective_state()
     return {
         "status": "ok",
@@ -537,17 +565,28 @@ async def list_recommendations(request: Request) -> dict[str, Any]:
     }
 
 
-@router.post("/recommendations/snooze")
+@router.post("/recommendations/snooze", response_model=None)
 async def snooze_latest_recommendation(
     request: Request,
     payload: _RecResolutionDep,
-) -> dict[str, Any]:
+) -> HTMLResponse | dict[str, Any]:
     """Snooze the most recent pending recommendation (Waybar middle-click shortcut)."""
     db = _get_db(request)
     bus = _get_bus(request)
 
     pending = await db.get_pending_recommendations()
     if not pending:
+        if is_htmx_request(request):
+            context = await build_recommendations_context(
+                request,
+                flash_message="No pending recommendations to snooze.",
+            )
+            return render_template(
+                request,
+                "_partials/recommendations_card.html",
+                context,
+                headers={"HX-Trigger": "recommendationChanged"},
+            )
         return {
             "status": "noop",
             "snoozed": False,
@@ -562,6 +601,17 @@ async def snooze_latest_recommendation(
         status="snoozed",
         metadata=payload.to_metadata(include_snooze=True),
     )
+    if is_htmx_request(request):
+        context = await build_recommendations_context(
+            request,
+            flash_message=f"Recommendation #{latest_id} snoozed.",
+        )
+        return render_template(
+            request,
+            "_partials/recommendations_card.html",
+            context,
+            headers={"HX-Trigger": "recommendationChanged"},
+        )
     return {
         "status": "ok",
         "snoozed": True,
@@ -569,12 +619,12 @@ async def snooze_latest_recommendation(
     }
 
 
-@router.post("/recommendations/{rec_id}/accept")
+@router.post("/recommendations/{rec_id}/accept", response_model=None)
 async def accept_recommendation(
     rec_id: int,
     request: Request,
     payload: _RecResolutionDep,
-) -> dict[str, Any]:
+) -> HTMLResponse | dict[str, Any]:
     """Accept a recommendation non-destructively (records status + emits event only)."""
     serialized = await _resolve_and_emit_recommendation(
         db=_get_db(request),
@@ -583,18 +633,32 @@ async def accept_recommendation(
         status="accepted",
         metadata=payload.to_metadata(),
     )
+    if is_htmx_request(request):
+        context = await build_recommendations_context(
+            request,
+            flash_message=(
+                f"Recommendation #{rec_id} accepted "
+                "(recorded only — no automatic timer or posture change)."
+            ),
+        )
+        return render_template(
+            request,
+            "_partials/recommendations_card.html",
+            context,
+            headers={"HX-Trigger": "recommendationChanged"},
+        )
     return {
         "status": "ok",
         "recommendation": serialized,
     }
 
 
-@router.post("/recommendations/{rec_id}/snooze")
+@router.post("/recommendations/{rec_id}/snooze", response_model=None)
 async def snooze_recommendation(
     rec_id: int,
     request: Request,
     payload: _RecResolutionDep,
-) -> dict[str, Any]:
+) -> HTMLResponse | dict[str, Any]:
     """Snooze a specific recommendation by ID."""
     serialized = await _resolve_and_emit_recommendation(
         db=_get_db(request),
@@ -603,18 +667,29 @@ async def snooze_recommendation(
         status="snoozed",
         metadata=payload.to_metadata(include_snooze=True),
     )
+    if is_htmx_request(request):
+        context = await build_recommendations_context(
+            request,
+            flash_message=f"Recommendation #{rec_id} snoozed.",
+        )
+        return render_template(
+            request,
+            "_partials/recommendations_card.html",
+            context,
+            headers={"HX-Trigger": "recommendationChanged"},
+        )
     return {
         "status": "ok",
         "recommendation": serialized,
     }
 
 
-@router.post("/recommendations/{rec_id}/dismiss")
+@router.post("/recommendations/{rec_id}/dismiss", response_model=None)
 async def dismiss_recommendation(
     rec_id: int,
     request: Request,
     payload: _RecResolutionDep,
-) -> dict[str, Any]:
+) -> HTMLResponse | dict[str, Any]:
     """Dismiss a specific recommendation by ID."""
     serialized = await _resolve_and_emit_recommendation(
         db=_get_db(request),
@@ -623,17 +698,28 @@ async def dismiss_recommendation(
         status="dismissed",
         metadata=payload.to_metadata(),
     )
+    if is_htmx_request(request):
+        context = await build_recommendations_context(
+            request,
+            flash_message=f"Recommendation #{rec_id} dismissed.",
+        )
+        return render_template(
+            request,
+            "_partials/recommendations_card.html",
+            context,
+            headers={"HX-Trigger": "recommendationChanged"},
+        )
     return {
         "status": "ok",
         "recommendation": serialized,
     }
 
 
-@router.post("/timers/start")
+@router.post("/timers/start", response_model=None)
 async def start_timer(
     request: Request,
     payload: _TimerStartDep,
-) -> dict[str, Any]:
+) -> HTMLResponse | dict[str, Any]:
     """Start a local Pomodoro ('25_5', '50_10') or custom timer."""
     timer_manager = _require_timer_manager(request)
     try:
@@ -648,6 +734,15 @@ async def start_timer(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+    if is_htmx_request(request):
+        context = await build_timer_context(request)
+        return render_template(
+            request,
+            "_partials/timer_card.html",
+            context,
+            headers={"HX-Trigger": "timerChanged"},
+        )
+
     return {
         "status": "ok",
         **timer_status,
@@ -655,14 +750,23 @@ async def start_timer(
     }
 
 
-@router.post("/timers/stop")
+@router.post("/timers/stop", response_model=None)
 async def stop_timer(
     request: Request,
     payload: _TimerStopDep,
-) -> dict[str, Any]:
+) -> HTMLResponse | dict[str, Any]:
     """Stop the currently active local timer."""
     timer_manager = _require_timer_manager(request)
     stop_result = await timer_manager.stop_timer(reason=payload.reason)
+    if is_htmx_request(request):
+        context = await build_timer_context(request)
+        return render_template(
+            request,
+            "_partials/timer_card.html",
+            context,
+            headers={"HX-Trigger": "timerChanged"},
+        )
+
     current_status = timer_manager.get_status()
     return {
         "status": "ok",
@@ -777,8 +881,8 @@ async def list_modules(request: Request) -> dict[str, Any]:
     }
 
 
-@router.post("/modules/{name}/enable")
-async def enable_module(name: str, request: Request) -> dict[str, Any]:
+@router.post("/modules/{name}/enable", response_model=None)
+async def enable_module(name: str, request: Request) -> HTMLResponse | dict[str, Any]:
     """Dynamically enable and start a module by name."""
     registry = _get_registry(request)
     if registry.get_status(name) is None and registry._resolve_category(name) is None:
@@ -788,6 +892,15 @@ async def enable_module(name: str, request: Request) -> dict[str, Any]:
         )
 
     ok = await registry.enable_module(name)
+    if is_htmx_request(request):
+        context = await build_modules_context(request)
+        return render_template(
+            request,
+            "_partials/modules_card.html",
+            context,
+            headers={"HX-Trigger": "modulesChanged"},
+        )
+
     status_info = registry.get_status(name) or {
         "module": name,
         "category": None,
@@ -801,8 +914,8 @@ async def enable_module(name: str, request: Request) -> dict[str, Any]:
     }
 
 
-@router.post("/modules/{name}/disable")
-async def disable_module(name: str, request: Request) -> dict[str, Any]:
+@router.post("/modules/{name}/disable", response_model=None)
+async def disable_module(name: str, request: Request) -> HTMLResponse | dict[str, Any]:
     """Dynamically stop and disable a module by name."""
     registry = _get_registry(request)
     if registry.get_status(name) is None and registry._resolve_category(name) is None:
@@ -812,6 +925,15 @@ async def disable_module(name: str, request: Request) -> dict[str, Any]:
         )
 
     ok = await registry.disable_module(name)
+    if is_htmx_request(request):
+        context = await build_modules_context(request)
+        return render_template(
+            request,
+            "_partials/modules_card.html",
+            context,
+            headers={"HX-Trigger": "modulesChanged"},
+        )
+
     status_info = registry.get_status(name) or {
         "module": name,
         "category": None,
@@ -825,35 +947,53 @@ async def disable_module(name: str, request: Request) -> dict[str, Any]:
     }
 
 
-@router.post("/privacy/pause")
-async def pause_privacy(request: Request) -> dict[str, Any]:
+@router.post("/privacy/pause", response_model=None)
+async def pause_privacy(request: Request) -> HTMLResponse | dict[str, Any]:
     """Enable global privacy pause, persist setting, and broadcast privacy_mode_changed."""
     settings = _get_settings(request)
     settings.privacy.global_pause = True
-    return await _persist_and_publish_privacy(
+    result = await _persist_and_publish_privacy(
         settings=settings,
         db=_get_db(request),
         bus=_get_bus(request),
     )
+    if is_htmx_request(request):
+        context = await build_privacy_context(request)
+        return render_template(
+            request,
+            "_partials/privacy_card.html",
+            context,
+            headers={"HX-Trigger": "privacyChanged"},
+        )
+    return result
 
 
-@router.post("/privacy/resume")
-async def resume_privacy(request: Request) -> dict[str, Any]:
+@router.post("/privacy/resume", response_model=None)
+async def resume_privacy(request: Request) -> HTMLResponse | dict[str, Any]:
     """Disable global privacy pause, persist setting, and broadcast privacy_mode_changed."""
     settings = _get_settings(request)
     settings.privacy.global_pause = False
-    return await _persist_and_publish_privacy(
+    result = await _persist_and_publish_privacy(
         settings=settings,
         db=_get_db(request),
         bus=_get_bus(request),
     )
+    if is_htmx_request(request):
+        context = await build_privacy_context(request)
+        return render_template(
+            request,
+            "_partials/privacy_card.html",
+            context,
+            headers={"HX-Trigger": "privacyChanged"},
+        )
+    return result
 
 
-@router.post("/privacy/dnd")
+@router.post("/privacy/dnd", response_model=None)
 async def set_or_toggle_dnd(
     request: Request,
     payload: _PrivacyDndDep,
-) -> dict[str, Any]:
+) -> HTMLResponse | dict[str, Any]:
     """Set or toggle DND mode, persist setting, and broadcast privacy_mode_changed."""
     settings = _get_settings(request)
     if payload.dnd_mode is not None:
@@ -863,8 +1003,17 @@ async def set_or_toggle_dnd(
     else:
         settings.privacy.dnd_mode = not bool(settings.privacy.dnd_mode)
 
-    return await _persist_and_publish_privacy(
+    result = await _persist_and_publish_privacy(
         settings=settings,
         db=_get_db(request),
         bus=_get_bus(request),
     )
+    if is_htmx_request(request):
+        context = await build_privacy_context(request)
+        return render_template(
+            request,
+            "_partials/privacy_card.html",
+            context,
+            headers={"HX-Trigger": "privacyChanged"},
+        )
+    return result

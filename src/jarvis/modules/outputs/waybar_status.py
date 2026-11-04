@@ -223,6 +223,10 @@ class WaybarStatusModule(BaseModule):
         if self._injected_status_file is not None:
             return self._injected_status_file
 
+        env_override = os.environ.get(WAYBAR_FILE_ENV_VAR, "").strip()
+        if env_override:
+            return Path(env_override).expanduser()
+
         for key in ("status_file", "waybar_file", "output_path"):
             direct = self.config.get(key)
             if direct:
@@ -235,10 +239,6 @@ class WaybarStatusModule(BaseModule):
                     nested = section.get(key)
                     if nested:
                         return Path(str(nested)).expanduser()
-
-        env_override = os.environ.get(WAYBAR_FILE_ENV_VAR, "").strip()
-        if env_override:
-            return Path(env_override).expanduser()
 
         return DEFAULT_WAYBAR_STATUS_FILE
 

@@ -52,6 +52,8 @@ MODULE_SETTINGS_SECTION: dict[str, str] = {
     "pomodoro_policy": "pomodoro",
     "focus_policy": "focus",
     "hyprland_ipc": "focus",
+    "waybar_status": "waybar",
+    "desktop_notify": "desktop_notify",
     "phone_bridge": "phone_bridge",
     "s24_webhook": "phone_bridge",
     "llm_ollama": "llm",

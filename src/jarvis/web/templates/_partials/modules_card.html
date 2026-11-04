@@ -1,0 +1,62 @@
+<div class="card-header">
+  <h2 class="card-title">Modules &amp; Runtime Health</h2>
+  <div class="btn-row">
+    <span class="badge badge-ok">{{ enabled_count }} enabled</span>
+    {% if degraded_count > 0 %}
+      <span class="badge badge-degraded">{{ degraded_count }} degraded</span>
+    {% endif %}
+  </div>
+</div>
+
+<div class="table-wrap">
+  <table>
+    <thead>
+      <tr>
+        <th>Module</th>
+        <th>Category</th>
+        <th>Health Status</th>
+        <th>Last Event</th>
+        <th>Last Error</th>
+        <th>Control</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for mod in modules %}
+        <tr data-module="{{ mod.module }}">
+          <td class="mono"><strong>{{ mod.module }}</strong></td>
+          <td><span class="badge badge-neutral">{{ mod.category }}</span></td>
+          <td>
+            <span class="badge badge-{{ mod.status }}">{{ mod.status }}</span>
+          </td>
+          <td class="mono muted">{{ mod.last_event_display }}</td>
+          <td class="mono">
+            {% if mod.last_error %}
+              <span class="badge badge-degraded">{{ mod.last_error }}</span>
+            {% else %}
+              <span class="muted">—</span>
+            {% endif %}
+          </td>
+          <td>
+            {% if mod.enabled %}
+              <button type="button"
+                      class="btn-danger btn-sm"
+                      hx-post="/api/modules/{{ mod.module }}/disable"
+                      hx-target="#modules-panel"
+                      hx-swap="innerHTML">
+                Disable
+              </button>
+            {% else %}
+              <button type="button"
+                      class="btn-success btn-sm"
+                      hx-post="/api/modules/{{ mod.module }}/enable"
+                      hx-target="#modules-panel"
+                      hx-swap="innerHTML">
+                Enable
+              </button>
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>

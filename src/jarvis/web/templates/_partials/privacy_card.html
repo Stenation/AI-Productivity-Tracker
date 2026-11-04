@@ -1,0 +1,74 @@
+<div class="card-header">
+  <h2 class="card-title">Privacy &amp; Mode Switches</h2>
+  <div class="btn-row">
+    {% if privacy.privacy_paused %}
+      <span class="badge badge-paused">Privacy Paused</span>
+    {% else %}
+      <span class="badge badge-ok">Monitoring Active</span>
+    {% endif %}
+    {% if privacy.dnd_mode %}
+      <span class="badge badge-dnd">DND On</span>
+    {% endif %}
+  </div>
+</div>
+
+<div class="switch-row">
+  <div>
+    <strong>Privacy Pause</strong>
+    <div class="muted">
+      {% if privacy.privacy_paused %}
+        All tracking, external events, and notifications are paused.
+      {% else %}
+        Pause all tracking, webhooks, policies, and alerts globally.
+      {% endif %}
+    </div>
+  </div>
+  {% if privacy.privacy_paused %}
+    <button type="button"
+            class="btn-success"
+            hx-post="/api/privacy/resume"
+            hx-target="#privacy-panel"
+            hx-swap="innerHTML">
+      Resume
+    </button>
+  {% else %}
+    <button type="button"
+            class="btn-danger"
+            hx-post="/api/privacy/pause"
+            hx-target="#privacy-panel"
+            hx-swap="innerHTML">
+      Privacy Pause
+    </button>
+  {% endif %}
+</div>
+
+<div class="switch-row">
+  <div>
+    <strong>DND Mode</strong>
+    <div class="muted">
+      {% if privacy.dnd_mode %}
+        Desktop notifications and prompts are suppressed while logging continues.
+      {% else %}
+        Suppress desktop alerts and prompts during meetings or focus/gaming.
+      {% endif %}
+    </div>
+  </div>
+  {% if privacy.dnd_mode %}
+    <button type="button"
+            class="btn-primary"
+            hx-post="/api/privacy/dnd"
+            hx-vals='{"dnd_mode": false}'
+            hx-target="#privacy-panel"
+            hx-swap="innerHTML">
+      Disable DND
+    </button>
+  {% else %}
+    <button type="button"
+            hx-post="/api/privacy/dnd"
+            hx-vals='{"dnd_mode": true}'
+            hx-target="#privacy-panel"
+            hx-swap="innerHTML">
+      DND Mode
+    </button>
+  {% endif %}
+</div>

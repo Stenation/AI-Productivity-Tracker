@@ -507,6 +507,35 @@ class Database:
                 rows = await cursor.fetchall()
             return [d for r in rows if (d := _row_to_dict(r)) is not None]
 
+    async def list_recommendations(
+        self,
+        limit: int = 50,
+        status: str | None = None,
+    ) -> list[dict[str, Any]]:
+        async with self._lock:
+            if status is not None:
+                async with self.connection.execute(
+                    """
+                    SELECT * FROM recommendations
+                    WHERE status = ?
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT ?
+                    """,
+                    (status, int(limit)),
+                ) as cursor:
+                    rows = await cursor.fetchall()
+            else:
+                async with self.connection.execute(
+                    """
+                    SELECT * FROM recommendations
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT ?
+                    """,
+                    (int(limit),),
+                ) as cursor:
+                    rows = await cursor.fetchall()
+            return [d for r in rows if (d := _row_to_dict(r)) is not None]
+
     async def find_recent_recommendation(
         self,
         dedupe_key: str,

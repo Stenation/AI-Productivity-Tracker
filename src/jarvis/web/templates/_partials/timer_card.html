@@ -1,0 +1,49 @@
+<div class="card-header">
+  <h2 class="card-title">Local Pomodoro Timer</h2>
+  {% if timer.active %}
+    <span class="badge badge-{{ timer.phase }}">
+      {{ timer.kind_display }} · {{ timer.phase_label }}
+    </span>
+  {% else %}
+    <span class="badge badge-neutral">Idle</span>
+  {% endif %}
+</div>
+
+<div class="stat-hero">
+  <span class="stat-value" data-testid="timer-countdown">{{ timer.remaining_display }}</span>
+  {% if timer.active %}
+    <span class="muted">planned {{ timer.planned_display }} ({{ timer.progress_percent }}%)</span>
+  {% else %}
+    <span class="muted">No active timer running</span>
+  {% endif %}
+</div>
+
+<div class="progress-track" aria-hidden="true">
+  <div class="progress-fill" style="width: {{ timer.progress_percent }}%;"></div>
+</div>
+
+<div class="btn-row" role="group" aria-label="Pomodoro timer controls">
+  <button type="button"
+          class="{% if timer.active and timer.kind == '25_5' %}active{% endif %}"
+          hx-post="/api/timers/start"
+          hx-vals='{"kind": "25_5"}'
+          hx-target="#timer-panel"
+          hx-swap="innerHTML">
+    Start 25/5
+  </button>
+  <button type="button"
+          class="{% if timer.active and timer.kind == '50_10' %}active{% endif %}"
+          hx-post="/api/timers/start"
+          hx-vals='{"kind": "50_10"}'
+          hx-target="#timer-panel"
+          hx-swap="innerHTML">
+    Start 50/10
+  </button>
+  <button type="button"
+          class="btn-danger"
+          hx-post="/api/timers/stop"
+          hx-target="#timer-panel"
+          hx-swap="innerHTML">
+    Stop
+  </button>
+</div>

@@ -28,9 +28,12 @@ from jarvis.core.schema import (
 from jarvis.core.settings import (
     DEFAULT_CONFIG_PATH,
     DEFAULT_MIGRATIONS_DIR,
+    DesktopNotifySettings,
     Settings,
+    WaybarSettings,
     load_settings,
 )
+from jarvis.core.timer import TimerManager
 
 __all__ = [
     "DEFAULT_CONFIG_PATH",
@@ -40,6 +43,7 @@ __all__ = [
     "ActivityState",
     "CalendarEvent",
     "Database",
+    "DesktopNotifySettings",
     "EffectiveActivityState",
     "EventBus",
     "EventType",
@@ -54,7 +58,9 @@ __all__ = [
     "StateResolver",
     "SystemStateSnapshot",
     "TaskType",
+    "TimerManager",
     "TimerSpan",
+    "WaybarSettings",
     "apply_migrations",
     "create_app",
     "ensure_aware",

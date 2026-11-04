@@ -1,0 +1,132 @@
+<div class="grid">
+  {% for item in daily_totals %}
+    <section class="card col-3" data-daily-activity="{{ item.activity }}">
+      <div class="card-header">
+        <span class="meta-label">Today · {{ item.label }}</span>
+        <span class="badge badge-{{ item.activity }}">{{ item.label }}</span>
+      </div>
+      <div class="stat-value">{{ item.display }}</div>
+    </section>
+  {% endfor %}
+
+  <section class="card col-12">
+    <div class="card-header">
+      <h2 class="card-title">Recent Activity Spans</h2>
+      <span class="badge badge-neutral">{{ activity_spans | length }} spans</span>
+    </div>
+    {% if activity_spans %}
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Activity</th>
+              <th>Duration</th>
+              <th>Source</th>
+              <th>Reason</th>
+              <th>Confidence</th>
+              <th>Started</th>
+              <th>Ended</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for span in activity_spans %}
+              <tr>
+                <td><span class="badge badge-{{ span.activity }}">{{ span.activity_label }}</span></td>
+                <td class="mono"><strong>{{ span.duration_display }}</strong></td>
+                <td class="mono">{{ span.source }}</td>
+                <td class="mono muted">{{ span.reason }}</td>
+                <td class="mono">{{ span.confidence }}</td>
+                <td class="mono muted">{{ span.started_display }}</td>
+                <td class="mono">
+                  {% if span.is_open %}
+                    <span class="badge badge-running">Active</span>
+                  {% else %}
+                    <span class="muted">{{ span.ended_display }}</span>
+                  {% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <div class="empty-state">No activity spans recorded yet.</div>
+    {% endif %}
+  </section>
+
+  <section class="card col-12">
+    <div class="card-header">
+      <h2 class="card-title">Pomodoro &amp; Timer Spans</h2>
+      <span class="badge badge-neutral">{{ timer_spans | length }} timers</span>
+    </div>
+    {% if timer_spans %}
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Preset / Kind</th>
+              <th>Status</th>
+              <th>Actual</th>
+              <th>Planned</th>
+              <th>Started</th>
+              <th>Ended</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for t in timer_spans %}
+              <tr data-timer-status="{{ t.status }}">
+                <td class="mono"><strong>{{ t.kind_display }}</strong></td>
+                <td><span class="badge badge-{{ t.status }}">{{ t.status }}</span></td>
+                <td class="mono">{{ t.actual_display }}</td>
+                <td class="mono muted">{{ t.planned_display }}</td>
+                <td class="mono muted">{{ t.started_display }}</td>
+                <td class="mono muted">{{ t.ended_display }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <div class="empty-state">No Pomodoro timer spans recorded yet.</div>
+    {% endif %}
+  </section>
+
+  <section class="card col-12">
+    <div class="card-header">
+      <h2 class="card-title">Recommendation History</h2>
+      <span class="badge badge-neutral">{{ recommendation_history | length }} items</span>
+    </div>
+    {% if recommendation_history %}
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Status</th>
+              <th>Policy</th>
+              <th>Message</th>
+              <th>Action</th>
+              <th>Dedupe Key</th>
+              <th>Created</th>
+              <th>Resolved</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for rec in recommendation_history %}
+              <tr data-rec-status="{{ rec.status }}">
+                <td><span class="badge badge-{{ rec.status }}">{{ rec.status }}</span></td>
+                <td><span class="badge badge-neutral">{{ rec.policy_label }}</span></td>
+                <td>{{ rec.message }}</td>
+                <td class="mono muted">{{ rec.suggested_action }}</td>
+                <td class="mono muted">{{ rec.dedupe_key }}</td>
+                <td class="mono muted">{{ rec.created_display }}</td>
+                <td class="mono muted">{{ rec.resolved_display }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <div class="empty-state">No recommendations recorded yet.</div>
+    {% endif %}
+  </section>
+</div>

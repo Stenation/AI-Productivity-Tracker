@@ -1,0 +1,129 @@
+{% extends "base.html" %}
+
+{% block title %}Settings &amp; Modules · Jarvis Posture Platform{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1>Modules, Privacy &amp; Thresholds</h1>
+  <span class="muted mono">Bound to {{ server.host }}:{{ server.port }}</span>
+</div>
+
+<div class="grid">
+  <section id="modules-panel"
+           class="card col-12"
+           hx-get="/partials/modules"
+           hx-trigger="every 3s"
+           hx-swap="innerHTML">
+    {% include "_partials/modules_card.html" %}
+  </section>
+
+  <section id="privacy-panel"
+           class="card col-6"
+           hx-get="/partials/privacy"
+           hx-trigger="every 3s"
+           hx-swap="innerHTML">
+    {% include "_partials/privacy_card.html" %}
+  </section>
+
+  <section class="card col-6">
+    <div class="card-header">
+      <h2 class="card-title">Privacy Guardrail Summary</h2>
+      <span class="badge badge-ok">Local-First Defaults</span>
+    </div>
+    <div class="meta-list">
+      <div class="meta-item">
+        <span class="meta-label">Hyprland IPC Mode</span>
+        <span class="meta-value mono">{{ privacy.hyprland_ipc_mode }}</span>
+      </div>
+      <div class="meta-item">
+        <span class="meta-label">Webcam Allowed</span>
+        <span class="meta-value mono">{{ privacy.allow_webcam }}</span>
+      </div>
+      <div class="meta-item">
+        <span class="meta-label">Microphone Mode</span>
+        <span class="meta-value mono">{{ privacy.microphone_mode }}</span>
+      </div>
+      <div class="meta-item">
+        <span class="meta-label">VLM Screenshots</span>
+        <span class="meta-value mono">{{ privacy.allow_vlm_screenshots }}</span>
+      </div>
+      <div class="meta-item">
+        <span class="meta-label">Calendar Writes</span>
+        <span class="meta-value mono">{{ privacy.allow_calendar_writes }}</span>
+      </div>
+      <div class="meta-item">
+        <span class="meta-label">Phone Webhook</span>
+        <span class="meta-value mono">{{ privacy.allow_phone_webhook }}</span>
+      </div>
+      <div class="meta-item">
+        <span class="meta-label">Local Bind Only</span>
+        <span class="meta-value mono">{{ privacy.dashboard_bind_local_only }}</span>
+      </div>
+      <div class="meta-item">
+        <span class="meta-label">Retention Window</span>
+        <span class="meta-value mono">{{ privacy.retention_days }} days</span>
+      </div>
+    </div>
+  </section>
+
+  <section class="card col-6">
+    <div class="card-header">
+      <h2 class="card-title">Posture &amp; Meeting Thresholds</h2>
+      <span class="badge badge-neutral">config.yaml</span>
+    </div>
+    <div class="meta-list">
+      <div class="meta-item">
+        <span class="meta-label">Max Continuous Sitting</span>
+        <span class="meta-value mono">{{ posture_cfg.max_sitting_minutes }}m</span>
+      </div>
+      <div class="meta-item">
+        <span class="meta-label">Max Continuous Walking</span>
+        <span class="meta-value mono">{{ posture_cfg.max_walking_minutes }}m</span>
+      </div>
+      <div class="meta-item">
+        <span class="meta-label">Pre-Meeting Warning</span>
+        <span class="meta-value mono">{{ posture_cfg.pre_meeting_warning_minutes }}m</span>
+      </div>
+      <div class="meta-item">
+        <span class="meta-label">Manual Override TTL</span>
+        <span class="meta-value mono">{{ posture_cfg.manual_override_ttl_minutes }}m</span>
+      </div>
+      <div class="meta-item">
+        <span class="meta-label">Recommendation Cooldown</span>
+        <span class="meta-value mono">{{ posture_cfg.recommendation_cooldown_minutes }}m</span>
+      </div>
+      <div class="meta-item">
+        <span class="meta-label">Sensor Consensus</span>
+        <span class="meta-value mono">
+          {{ posture_cfg.sensor_consensus_samples }} / {{ posture_cfg.sensor_consensus_window_samples }} samples
+        </span>
+      </div>
+    </div>
+  </section>
+
+  <section class="card col-6">
+    <div class="card-header">
+      <h2 class="card-title">Pomodoro &amp; Focus Cooldowns</h2>
+      <span class="badge badge-neutral">
+        Auto-start: {{ pomodoro_cfg.auto_start }}
+      </span>
+    </div>
+    <div class="meta-list">
+      <div class="meta-item">
+        <span class="meta-label">Pomodoro Cooldown</span>
+        <span class="meta-value mono">{{ pomodoro_cfg.recommendation_cooldown_minutes }}m</span>
+      </div>
+      <div class="meta-item">
+        <span class="meta-label">Distraction Grace</span>
+        <span class="meta-value mono">{{ focus_cfg.distraction_grace_seconds }}s</span>
+      </div>
+      {% for mapping in pomodoro_cfg.mappings %}
+        <div class="meta-item">
+          <span class="meta-label">Task: {{ mapping.task_type }}</span>
+          <span class="meta-value mono">{{ mapping.preset }}</span>
+        </div>
+      {% endfor %}
+    </div>
+  </section>
+</div>
+{% endblock %}

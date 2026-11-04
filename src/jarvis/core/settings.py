@@ -242,6 +242,29 @@ class LlmSettings(BaseModel):
     keep_alive_minutes: int = Field(default=15, ge=0)
 
 
+class WaybarSettings(BaseModel):
+    model_config = ConfigDict(validate_default=True, extra="ignore")
+
+    status_file: Path = Path("/dev/shm/posture_waybar.json")
+    refresh_interval_seconds: float = Field(default=15.0, gt=0)
+    signal_waybar: bool = True
+    waybar_signal: int = Field(default=8, ge=1)
+
+    @field_validator("status_file", mode="before")
+    @classmethod
+    def _validate_status_file(cls, value: Path | str) -> Path:
+        return _expand_path(value)
+
+
+class DesktopNotifySettings(BaseModel):
+    model_config = ConfigDict(validate_default=True, extra="ignore")
+
+    notify_binary: str = "notify-send"
+    app_name: str = "Posture Platform"
+    urgency: Literal["low", "normal", "critical"] = "normal"
+    expire_time_ms: int | None = Field(default=None, ge=0)
+
+
 class Settings(BaseSettings):
     """Top-level validated platform settings loaded from YAML and environment."""
 
@@ -268,6 +291,10 @@ class Settings(BaseSettings):
     )
     webcam: WebcamSettings = Field(default_factory=WebcamSettings)
     swalk_ble: SwalkBleSettings = Field(default_factory=SwalkBleSettings)
+    waybar: WaybarSettings = Field(default_factory=WaybarSettings)
+    desktop_notify: DesktopNotifySettings = Field(
+        default_factory=DesktopNotifySettings
+    )
     phone_bridge: PhoneBridgeSettings = Field(default_factory=PhoneBridgeSettings)
     llm: LlmSettings = Field(default_factory=LlmSettings)
 
