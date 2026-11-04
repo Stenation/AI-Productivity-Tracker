@@ -434,6 +434,56 @@ class DesktopNotifySettings(BaseModel):
     expire_time_ms: int | None = Field(default=None, ge=0)
 
 
+class VoiceSettings(BaseModel):
+    model_config = ConfigDict(validate_default=True, extra="ignore")
+
+    ptt_state_file: Path = Path("/dev/shm/jarvis_ptt.json")
+    ptt_audio_file: Path = Path("/dev/shm/jarvis_ptt.wav")
+    max_duration_seconds: float = Field(default=30.0, gt=0)
+    recorder_binary: str = "pw-record"
+    model_size: str = "base.en"
+    device: str = "cpu"
+    compute_type: str = "int8"
+    api_url: str = "http://127.0.0.1:8000"
+    model_path: Path | None = None
+
+    @field_validator("ptt_state_file", "ptt_audio_file", mode="before")
+    @classmethod
+    def _validate_paths(cls, value: Path | str) -> Path:
+        return _expand_path(value)
+
+    @field_validator("model_path", mode="before")
+    @classmethod
+    def _validate_optional_path(cls, value: Path | str | None) -> Path | None:
+        return _expand_optional_path(value)
+
+
+class TtsSettings(BaseModel):
+    model_config = ConfigDict(validate_default=True, extra="ignore")
+
+    voice_model_path: Path = Path(
+        "~/.local/share/posture-platform/voices/en_US-lessac-medium.onnx"
+    )
+    config_path: Path | None = None
+    piper_binary: str | None = None
+    player_binary: str = "pw-play"
+    temp_dir: Path = Path("/dev/shm")
+    speaker_id: int | None = None
+    length_scale: float = Field(default=1.0, gt=0)
+    noise_scale: float = 0.667
+    noise_w: float = 0.8
+
+    @field_validator("voice_model_path", "temp_dir", mode="before")
+    @classmethod
+    def _validate_path(cls, value: Path | str) -> Path:
+        return _expand_path(value)
+
+    @field_validator("config_path", mode="before")
+    @classmethod
+    def _validate_optional_path(cls, value: Path | str | None) -> Path | None:
+        return _expand_optional_path(value)
+
+
 class Settings(BaseSettings):
     """Top-level validated platform settings loaded from YAML and environment."""
 
@@ -472,6 +522,8 @@ class Settings(BaseSettings):
     )
     phone_bridge: PhoneBridgeSettings = Field(default_factory=PhoneBridgeSettings)
     llm: LlmSettings = Field(default_factory=LlmSettings)
+    voice: VoiceSettings = Field(default_factory=VoiceSettings)
+    tts: TtsSettings = Field(default_factory=TtsSettings)
 
     @field_validator("migrations_dir", mode="before")
     @classmethod

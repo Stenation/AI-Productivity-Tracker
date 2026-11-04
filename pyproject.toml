@@ -21,6 +21,7 @@ dependencies = [
 
 [project.scripts]
 jarvis = "jarvis.main:main"
+jarvis-ptt = "jarvis.workers.ptt_voice:main"
 
 [dependency-groups]
 dev = [
@@ -36,6 +37,10 @@ calendar = [
 ]
 llm = [
     "ollama>=0.6,<1.0",
+]
+voice = [
+    "faster-whisper>=1.1,<2.0",
+    "piper-tts>=1.2,<2.0",
 ]
 
 [tool.hatch.build.targets.wheel]

@@ -57,6 +57,7 @@ MODULE_SETTINGS_SECTION: dict[str, str] = {
     "phone_bridge": "phone_bridge",
     "s24_webhook": "phone_bridge",
     "llm_ollama": "llm",
+    "tts_piper": "tts",
 }
 
 

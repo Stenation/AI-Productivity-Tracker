@@ -304,14 +304,20 @@ async def _persist_and_publish_privacy(
 ) -> dict[str, Any]:
     global_pause = bool(settings.privacy.global_pause)
     dnd_mode = bool(settings.privacy.dnd_mode)
+    allow_tts = bool(settings.privacy.allow_tts)
+    microphone_mode = settings.privacy.microphone_mode
 
     await db.set_setting("privacy.global_pause", global_pause)
     await db.set_setting("privacy.dnd_mode", dnd_mode)
+    await db.set_setting("privacy.allow_tts", allow_tts)
+    await db.set_setting("privacy.microphone_mode", microphone_mode)
     await db.set_setting(
         "privacy",
         {
             "global_pause": global_pause,
             "dnd_mode": dnd_mode,
+            "allow_tts": allow_tts,
+            "microphone_mode": microphone_mode,
         },
     )
 
@@ -324,6 +330,8 @@ async def _persist_and_publish_privacy(
                 "global_pause": global_pause,
                 "privacy_paused": global_pause,
                 "dnd_mode": dnd_mode,
+                "allow_tts": allow_tts,
+                "microphone_mode": microphone_mode,
             },
         )
     )
@@ -332,6 +340,8 @@ async def _persist_and_publish_privacy(
         "global_pause": global_pause,
         "privacy_paused": global_pause,
         "dnd_mode": dnd_mode,
+        "allow_tts": allow_tts,
+        "microphone_mode": microphone_mode,
     }
 
 
@@ -439,6 +449,8 @@ async def get_state(request: Request) -> dict[str, Any]:
             "dnd_mode": dnd_mode,
             "allow_phone_webhook": bool(settings.privacy.allow_phone_webhook),
             "hyprland_ipc_mode": settings.privacy.hyprland_ipc_mode,
+            "allow_tts": bool(settings.privacy.allow_tts),
+            "microphone_mode": settings.privacy.microphone_mode,
         },
         "pending_recommendation_count": len(pending_recommendations),
         "pending_recommendations": pending_recommendations,
@@ -1055,6 +1067,23 @@ async def ask_assistant(
             content={
                 "detail": msg,
                 "error": "privacy_paused",
+                "message": msg,
+            },
+        )
+
+    # 1b. Microphone mode disabled check for voice requests -> 409 Conflict
+    if payload.source == "voice" and settings.privacy.microphone_mode == "disabled":
+        msg = "Microphone is disabled in privacy settings."
+        if is_htmx_request(request):
+            return HTMLResponse(
+                f"<div class='alert alert-warning p-2'>{msg}</div>",
+                status_code=409,
+            )
+        return JSONResponse(
+            status_code=409,
+            content={
+                "detail": msg,
+                "error": "microphone_disabled",
                 "message": msg,
             },
         )
