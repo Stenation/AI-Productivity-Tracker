@@ -39,6 +39,8 @@ EventType = Literal[
     "screen_check_completed",
     "module_health_changed",
     "privacy_mode_changed",
+    "assistant_answered",
+    "tts_requested",
 ]
 
 ActivityState = Literal[
@@ -271,3 +273,51 @@ class SystemStateSnapshot(BaseModel):
     privacy_paused: bool = False
     dnd_mode: bool = False
     timestamp: AwareDatetime = Field(default_factory=now_local)
+
+
+class AskRequest(BaseModel):
+    """Payload for POST /api/ask."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    question: str
+    source: Literal["dashboard", "voice"] | str = "dashboard"
+    speak: bool = False
+
+
+class AskResponse(BaseModel):
+    """Response payload for POST /api/ask."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    answer: str
+    suggested_action: str | None = None
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    model: str
+    interaction_id: int | None = None
+
+
+class LlmInteraction(BaseModel):
+    """Persisted record of an LLM question/answer interaction."""
+
+    model_config = ConfigDict(extra="ignore", from_attributes=True)
+
+    id: int | None = None
+    source: str
+    question: str
+    answer: str
+    suggested_action: str | None = None
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    model: str
+    latency_ms: int | None = None
+    metadata: dict[str, Any] | None = None
+    created_at: AwareDatetime = Field(default_factory=now_local)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _unpack_metadata_json(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "metadata" not in data and "metadata_json" in data:
+            copied = dict(data)
+            copied["metadata"] = _maybe_parse_json_dict(copied.get("metadata_json"))
+            return copied
+        return data

@@ -167,7 +167,11 @@ phone_bridge:
 llm:
   provider: "ollama"
   base_url: "http://127.0.0.1:11434"
-  text_model: "qwen2.5:3b"
+  # Default: "qwen3:14b". Lightweight low-VRAM alternative: "qwen2.5:3b"
+  text_model: "qwen3:14b"
   vision_model: "qwen2.5vl:7b"
-  keep_alive_minutes: 15
+  keep_alive: "5m"
+  keep_alive_minutes: 5
+  timeout_seconds: 30.0
+  enable_classification_fallback: false
 

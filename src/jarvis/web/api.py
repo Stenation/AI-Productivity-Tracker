@@ -9,15 +9,23 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from jarvis.core.bus import EventBus
 from jarvis.core.database import Database
+from jarvis.core.llm import (
+    LlmConnectionError,
+    LlmError,
+    LlmTimeoutError,
+    LlmValidationError,
+)
 from jarvis.core.registry import ModuleRegistry
 from jarvis.core.resolver import StateResolver
 from jarvis.core.schema import (
     ActivitySpan,
+    AskRequest,
+    AskResponse,
     CalendarEvent,
     FocusState,
     ManualActivityState,
@@ -30,6 +38,7 @@ from jarvis.core.schema import (
 from jarvis.core.settings import Settings
 from jarvis.core.timer import TimerManager
 from jarvis.modules.inputs.manual_control import ManualControlModule
+from jarvis.modules.outputs.llm_ollama import LlmOllamaModule
 from jarvis.web.views import (
     build_modules_context,
     build_posture_context,
@@ -182,6 +191,10 @@ _TimerStopDep = Annotated[
 _PrivacyDndDep = Annotated[
     PrivacyDndRequest,
     Depends(_parse_json_or_form(PrivacyDndRequest, allow_empty=True)),
+]
+_AskDep = Annotated[
+    AskRequest,
+    Depends(_parse_json_or_form(AskRequest)),
 ]
 
 
@@ -1017,3 +1030,153 @@ async def set_or_toggle_dnd(
             headers={"HX-Trigger": "privacyChanged"},
         )
     return result
+
+
+@router.post("/ask", response_model=None)
+async def ask_assistant(
+    request: Request,
+    payload: _AskDep,
+) -> HTMLResponse | JSONResponse | dict[str, Any]:
+    """Ask the local LLM assistant a question in platform context (FR-23)."""
+    settings = _get_settings(request)
+    resolver = _get_resolver(request)
+    registry = _get_registry(request)
+
+    # 1. Privacy global pause check -> 409 Conflict
+    if settings.privacy.global_pause or resolver.get_effective_state().privacy_paused:
+        msg = "Privacy global pause is active. Assistant requests are suspended."
+        if is_htmx_request(request):
+            return HTMLResponse(
+                f"<div class='alert alert-warning p-2'>{msg}</div>",
+                status_code=409,
+            )
+        return JSONResponse(
+            status_code=409,
+            content={
+                "detail": msg,
+                "error": "privacy_paused",
+                "message": msg,
+            },
+        )
+
+    # 2. Disabled module or missing dependency check -> 503 Service Unavailable
+    llm_mod = registry.get_module("llm_ollama")
+    if not registry.is_enabled("llm_ollama") or llm_mod is None:
+        if not LlmOllamaModule.is_available():
+            msg = (
+                "Module 'llm_ollama' dependency group is missing. "
+                "Install with 'uv sync --group llm' and enable llm_ollama in Settings."
+            )
+        else:
+            msg = "Module llm_ollama is disabled. Enable llm_ollama in Settings."
+        if is_htmx_request(request):
+            return HTMLResponse(
+                f"<div class='alert alert-danger p-2'>{msg}</div>",
+                status_code=503,
+            )
+        return JSONResponse(
+            status_code=503,
+            content={
+                "detail": msg,
+                "error": "module_unavailable",
+                "message": msg,
+            },
+        )
+
+    # 3. Call LlmOllamaModule.ask(...)
+    try:
+        result = await llm_mod.ask(
+            question=payload.question,
+            source=payload.source,
+            speak=payload.speak,
+            resolver=resolver,
+            timer_manager=_get_timer_manager(request),
+            settings=settings,
+        )
+    except LlmValidationError as exc:
+        msg = f"Invalid model response: {exc}"
+        if is_htmx_request(request):
+            return HTMLResponse(
+                f"<div class='alert alert-danger p-2'>{msg}</div>",
+                status_code=502,
+            )
+        return JSONResponse(
+            status_code=502,
+            content={
+                "detail": msg,
+                "error": "validation_error",
+                "message": str(exc),
+            },
+        )
+    except (LlmConnectionError, LlmTimeoutError, LlmError) as exc:
+        msg = f"Ollama service error: {exc}"
+        if is_htmx_request(request):
+            return HTMLResponse(
+                f"<div class='alert alert-danger p-2'>{msg}</div>",
+                status_code=503,
+            )
+        return JSONResponse(
+            status_code=503,
+            content={
+                "detail": msg,
+                "error": "ollama_error",
+                "message": str(exc),
+            },
+        )
+    except Exception as exc:
+        msg = f"Unexpected error processing assistant question: {exc}"
+        if is_htmx_request(request):
+            return HTMLResponse(
+                f"<div class='alert alert-danger p-2'>{msg}</div>",
+                status_code=503,
+            )
+        return JSONResponse(
+            status_code=503,
+            content={
+                "detail": msg,
+                "error": "assistant_error",
+                "message": str(exc),
+            },
+        )
+
+    # 4. Handle HTMX partial response
+    if is_htmx_request(request):
+        suggested = result.get("suggested_action")
+        action_html = (
+            f"<div class='text-muted small mt-1'>Suggested action: <code>{suggested}</code></div>"
+            if suggested
+            else ""
+        )
+        conf_str = f"{result['confidence']:.2f}"
+        html = f"""<div class="assistant-response card p-3 mb-2">
+  <div class="answer">{result['answer']}</div>
+  {action_html}
+  <div class="meta text-muted small mt-2">Model: {result['model']} | Confidence: {conf_str}</div>
+</div>"""
+        return HTMLResponse(
+            content=html,
+            status_code=200,
+            headers={"HX-Trigger": "assistantAnswered"},
+        )
+
+    return AskResponse(
+        answer=result["answer"],
+        suggested_action=result.get("suggested_action"),
+        confidence=float(result["confidence"]),
+        model=result["model"],
+        interaction_id=result.get("interaction_id", 0),
+    ).model_dump(mode="json")
+
+
+@router.get("/ask/history")
+async def get_ask_history(
+    request: Request,
+    limit: Annotated[int, Query(ge=1, le=500)] = 50,
+) -> dict[str, Any]:
+    """Return recent LLM interactions."""
+    db = _get_db(request)
+    interactions = await db.list_llm_interactions(limit=limit)
+    return {
+        "interactions": interactions,
+        "count": len(interactions),
+    }

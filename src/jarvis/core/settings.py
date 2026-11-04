@@ -403,9 +403,12 @@ class LlmSettings(BaseModel):
 
     provider: str = "ollama"
     base_url: str = "http://127.0.0.1:11434"
-    text_model: str = "qwen2.5:3b"
+    text_model: str = "qwen3:14b"
     vision_model: str = "qwen2.5vl:7b"
-    keep_alive_minutes: int = Field(default=15, ge=0)
+    keep_alive: str = "5m"
+    keep_alive_minutes: int = Field(default=5, ge=0)
+    timeout_seconds: float = Field(default=30.0, gt=0)
+    enable_classification_fallback: bool = False
 
 
 class WaybarSettings(BaseModel):

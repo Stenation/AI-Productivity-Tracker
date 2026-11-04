@@ -1013,6 +1013,15 @@ class Database:
             assert result is not None
             return result
 
+    async def get_module_health(self, module: str) -> dict[str, Any] | None:
+        async with self._lock:
+            async with self.connection.execute(
+                "SELECT * FROM module_health WHERE module = ?",
+                (module,),
+            ) as cursor:
+                row = await cursor.fetchone()
+            return _row_to_dict(row)
+
     async def list_module_health(self) -> list[dict[str, Any]]:
         async with self._lock:
             async with self.connection.execute(
@@ -1055,4 +1064,85 @@ class Database:
             "value_json": value_json,
             "updated_at": updated_iso,
         }
+
+    # ------------------------------------------------------------------
+    # LLM interactions
+    # ------------------------------------------------------------------
+
+    async def record_llm_interaction(
+        self,
+        source: str,
+        question: str,
+        answer: str,
+        suggested_action: str | None = None,
+        confidence: float = 1.0,
+        model: str = "",
+        latency_ms: int | None = None,
+        metadata: dict[str, Any] | None = None,
+        created_at: datetime | str | None = None,
+    ) -> dict[str, Any]:
+        """Insert a completed LLM interaction into llm_interactions."""
+        created_iso = _to_iso(created_at)
+        metadata_json = _dumps_optional_json(metadata)
+
+        async with self._lock:
+            conn = self.connection
+            cursor = await conn.execute(
+                """
+                INSERT INTO llm_interactions (
+                  source, question, answer, suggested_action, confidence,
+                  model, latency_ms, metadata_json, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    source,
+                    question,
+                    answer,
+                    suggested_action,
+                    float(confidence),
+                    model,
+                    latency_ms,
+                    metadata_json,
+                    created_iso,
+                ),
+            )
+            interaction_id = cursor.lastrowid
+            await conn.commit()
+
+            async with conn.execute(
+                "SELECT * FROM llm_interactions WHERE id = ?",
+                (interaction_id,),
+            ) as fetch_cursor:
+                row = await fetch_cursor.fetchone()
+            result = _row_to_dict(row)
+            assert result is not None
+            return result
+
+    async def get_llm_interaction(self, interaction_id: int) -> dict[str, Any] | None:
+        """Fetch an interaction by primary key."""
+        async with self._lock:
+            async with self.connection.execute(
+                "SELECT * FROM llm_interactions WHERE id = ?",
+                (int(interaction_id),),
+            ) as cursor:
+                row = await cursor.fetchone()
+            return _row_to_dict(row)
+
+    async def list_llm_interactions(
+        self,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """List recent LLM interactions ordered by creation time descending."""
+        async with self._lock:
+            async with self.connection.execute(
+                """
+                SELECT * FROM llm_interactions
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+                """,
+                (max(1, int(limit)),),
+            ) as cursor:
+                rows = await cursor.fetchall()
+            return [d for r in rows if (d := _row_to_dict(r)) is not None]
 
