@@ -160,44 +160,55 @@ def test_parse_socket2_line_and_classify_window_precedence() -> None:
 
     # Classification precedence:
     # 1. work_app_classes beats distraction keywords in file names
-    assert classify_window("code", "reddit_scraper.py - Visual Studio Code") == (
-        "focused",
-        "app_class",
-    )
-    assert classify_window("Alacritty", "zsh") == ("focused", "app_class")
+    res1 = classify_window("code", "reddit_scraper.py - Visual Studio Code")
+    assert res1.category == "focused"
+    assert res1.classifier == "app_class"
+    assert res1.is_call_window is False
+
+    res2 = classify_window("Alacritty", "zsh")
+    assert res2.category == "focused"
+    assert res2.classifier == "app_class"
 
     # 2. distraction_title_patterns catches YouTube/Reddit/X without false-matching Firefox
-    assert classify_window("firefox", "Arch Linux Wiki — Mozilla Firefox") == (
-        "unknown",
-        "default",
-    )
-    assert classify_window("firefox", "Reddit - /r/hyprland — Mozilla Firefox") == (
-        "distracted",
-        "title_pattern",
-    )
-    assert classify_window("firefox", "Home / X — Mozilla Firefox") == (
-        "distracted",
-        "title_pattern",
-    )
-    assert classify_window("firefox", "Lo-Fi Beats - YouTube — Mozilla Firefox") == (
-        "distracted",
-        "title_pattern",
-    )
+    res3 = classify_window("firefox", "Arch Linux Wiki — Mozilla Firefox")
+    assert res3.category == "unknown"
+    assert res3.classifier == "default"
 
-    # 3. Calendar task mapping (`meeting` / `break` -> `neutral`) for unmatched apps
-    assert classify_window(
+    res4 = classify_window("firefox", "Reddit - /r/hyprland — Mozilla Firefox")
+    assert res4.category == "distracted"
+    assert res4.classifier == "title_rule"
+
+    res5 = classify_window("firefox", "Home / X — Mozilla Firefox")
+    assert res5.category == "distracted"
+    assert res5.classifier == "title_rule"
+
+    res6 = classify_window("firefox", "Lo-Fi Beats - YouTube — Mozilla Firefox")
+    assert res6.category == "distracted"
+    assert res6.classifier == "title_rule"
+
+    # 3. Calendar task correlation for unmatched apps
+    res7 = classify_window(
         "firefox",
         "Google Meet — Mozilla Firefox",
         calendar_task_type="meeting",
-    ) == ("neutral", "calendar_task")
-    assert classify_window(
+    )
+    assert res7.category == "focused"
+    assert res7.classifier == "calendar_correlation"
+    assert res7.is_call_window is True
+
+    res8 = classify_window(
         "mpv",
         "Break stretch video",
         calendar_task_type="break",
-    ) == ("neutral", "calendar_task")
+    )
+    assert res8.category == "neutral"
+    assert res8.classifier == "calendar_correlation"
 
     # 4. Empty desktop
-    assert classify_window("", "") == ("neutral", "desktop")
+    res_desktop = classify_window("", "")
+    assert res_desktop.category == "neutral"
+    assert res_desktop.classifier == "desktop"
+    assert res_desktop.confidence == 1.0
 
 
 async def test_unix_socket_stream_dedupe_desktop_calendar_link_and_stop_close(
@@ -280,6 +291,12 @@ async def test_unix_socket_stream_dedupe_desktop_calendar_link_and_stop_close(
         assert spans_after_first[0]["category"] == "focused"
         assert spans_after_first[0]["calendar_event_id"] == "cal_coding_1"
         assert spans_after_first[0]["ended_at"] is None
+        assert spans_after_first[0]["metadata"] == {
+            "category": "focused",
+            "classifier": "app_class",
+            "confidence": 0.95,
+            "is_call_window": False,
+        }
 
         # 2. Switch to distracted browser tab -> closes previous span, opens distracted span
         t_cursor = t_cursor + timedelta(minutes=5)
@@ -292,6 +309,13 @@ async def test_unix_socket_stream_dedupe_desktop_calendar_link_and_stop_close(
         assert cur_span is not None
         assert cur_span["app_class"] == "firefox"
         assert cur_span["category"] == "distracted"
+        assert cur_span["classifier"] == "title_rule"
+        assert cur_span["metadata"] == {
+            "category": "distracted",
+            "classifier": "title_rule",
+            "confidence": 0.90,
+            "is_call_window": False,
+        }
 
         # 3. Switch to empty workspace (`activewindow>>,`) -> closes current span, no blank row
         t_cursor = t_cursor + timedelta(minutes=3)
@@ -312,7 +336,15 @@ async def test_unix_socket_stream_dedupe_desktop_calendar_link_and_stop_close(
         await _wait_until(lambda: len(focus_events) == 4)
 
         assert focus_events[3].payload["category"] == "unknown"
-        assert (await db.get_current_window_span()) is not None
+        pavu_span = await db.get_current_window_span()
+        assert pavu_span is not None
+        assert pavu_span["classifier"] == "default"
+        assert pavu_span["metadata"] == {
+            "category": "unknown",
+            "classifier": "default",
+            "confidence": 0.0,
+            "is_call_window": False,
+        }
 
         # 5. Stopping module cleanly closes the currently open window span
         t_cursor = t_cursor + timedelta(minutes=4)
@@ -753,4 +785,212 @@ async def test_input_idle_changed_threshold_manual_override_ttl_and_hypridle_con
     reg_bus = EventBus()
     registry = ModuleRegistry(bus=reg_bus, db=db, settings=test_settings)
     assert registry._resolve_category("hyprland_ipc") == "inputs"
+
+
+async def test_window_classification_work_window_metadata(
+    db: Database,
+    test_settings: Settings,
+) -> None:
+    """Verify that a work window produces category='focused' and stores classification metadata."""
+    t0 = datetime(2026, 11, 4, 16, 0, 0).astimezone()
+    bus = EventBus()
+    focus_events: list[PlatformEvent] = []
+    bus.subscribe("window_focus_changed", focus_events.append)
+
+    reader = asyncio.StreamReader()
+    mod = HyprlandIpcModule(
+        bus=bus,
+        db=db,
+        config=test_settings.model_dump(),
+        stream_reader=reader,
+        clock=lambda: t0,
+    )
+    await mod.start()
+    try:
+        await mod.handle_raw_line("activewindow>>code,main.py - jarvis\n", now=t0)
+        assert len(focus_events) == 1
+        assert focus_events[0].payload["category"] == "focused"
+        assert focus_events[0].payload["classifier"] == "app_class"
+
+        span = await db.get_current_window_span()
+        assert span is not None
+        assert span["app_class"] == "code"
+        assert span["category"] == "focused"
+        assert span["classifier"] == "app_class"
+        assert span["metadata"] == {
+            "category": "focused",
+            "classifier": "app_class",
+            "confidence": 0.95,
+            "is_call_window": False,
+        }
+    finally:
+        reader.feed_eof()
+        await mod.stop()
+
+
+async def test_window_classification_distraction_window(
+    db: Database,
+    test_settings: Settings,
+) -> None:
+    """Verify that a distraction window produces category='distracted' and stores metadata."""
+    t0 = datetime(2026, 11, 4, 16, 10, 0).astimezone()
+    bus = EventBus()
+    focus_events: list[PlatformEvent] = []
+    bus.subscribe("window_focus_changed", focus_events.append)
+
+    reader = asyncio.StreamReader()
+    mod = HyprlandIpcModule(
+        bus=bus,
+        db=db,
+        config=test_settings.model_dump(),
+        stream_reader=reader,
+        clock=lambda: t0,
+    )
+    await mod.start()
+    try:
+        await mod.handle_raw_line(
+            "activewindow>>firefox,Twitch - Live Stream — Mozilla Firefox\n", now=t0
+        )
+        assert len(focus_events) == 1
+        assert focus_events[0].payload["category"] == "distracted"
+        assert focus_events[0].payload["classifier"] == "title_rule"
+
+        span = await db.get_current_window_span()
+        assert span is not None
+        assert span["app_class"] == "firefox"
+        assert span["category"] == "distracted"
+        assert span["classifier"] == "title_rule"
+        assert span["metadata"] == {
+            "category": "distracted",
+            "classifier": "title_rule",
+            "confidence": 0.90,
+            "is_call_window": False,
+        }
+    finally:
+        reader.feed_eof()
+        await mod.stop()
+
+
+async def test_window_classification_call_window_sets_flag(
+    db: Database,
+    test_settings: Settings,
+) -> None:
+    """Verify that a call window sets is_call_window=True in span metadata."""
+    t0 = datetime(2026, 11, 4, 16, 20, 0).astimezone()
+    bus = EventBus()
+    focus_events: list[PlatformEvent] = []
+    bus.subscribe("window_focus_changed", focus_events.append)
+
+    reader = asyncio.StreamReader()
+    mod = HyprlandIpcModule(
+        bus=bus,
+        db=db,
+        config=test_settings.model_dump(),
+        stream_reader=reader,
+        clock=lambda: t0,
+    )
+    await mod.start()
+    try:
+        # Test 1: Native call app (zoom)
+        await mod.handle_raw_line("activewindow>>zoom,Zoom Meeting\n", now=t0)
+        assert len(focus_events) == 1
+        span1 = await db.get_current_window_span()
+        assert span1 is not None
+        assert span1["metadata"]["is_call_window"] is True
+
+        # Test 2: In-browser call window (Google Meet)
+        t1 = t0 + timedelta(minutes=5)
+        await mod.handle_raw_line(
+            "activewindow>>firefox,Meet - abc-defg-hij — Mozilla Firefox\n", now=t1
+        )
+        assert len(focus_events) == 2
+        span2 = await db.get_current_window_span()
+        assert span2 is not None
+        assert span2["metadata"]["is_call_window"] is True
+
+        # Test 3: Microsoft Teams
+        t2 = t0 + timedelta(minutes=10)
+        await mod.handle_raw_line(
+            "activewindow>>teams,Microsoft Teams\n", now=t2
+        )
+        assert len(focus_events) == 3
+        span3 = await db.get_current_window_span()
+        assert span3 is not None
+        assert span3["metadata"]["is_call_window"] is True
+    finally:
+        reader.feed_eof()
+        await mod.stop()
+
+
+async def test_window_classification_failure_and_unknown_preserves_persistence(
+    db: Database,
+    test_settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify that classification exceptions or unknown results do not break span persistence."""
+    t0 = datetime(2026, 11, 4, 16, 30, 0).astimezone()
+    bus = EventBus()
+    focus_events: list[PlatformEvent] = []
+    bus.subscribe("window_focus_changed", focus_events.append)
+
+    reader = asyncio.StreamReader()
+    mod = HyprlandIpcModule(
+        bus=bus,
+        db=db,
+        config=test_settings.model_dump(),
+        stream_reader=reader,
+        clock=lambda: t0,
+    )
+    await mod.start()
+    try:
+        # Case A: Unknown window classification (neither work, distraction, nor call)
+        await mod.handle_raw_line(
+            "activewindow>>gucharmap,Character Map\n", now=t0
+        )
+        assert len(focus_events) == 1
+        assert focus_events[0].payload["category"] == "unknown"
+        assert focus_events[0].payload["classifier"] == "default"
+
+        span_unknown = await db.get_current_window_span()
+        assert span_unknown is not None
+        assert span_unknown["app_class"] == "gucharmap"
+        assert span_unknown["category"] == "unknown"
+        assert span_unknown["classifier"] == "default"
+        assert span_unknown["metadata"] == {
+            "category": "unknown",
+            "classifier": "default",
+            "confidence": 0.0,
+            "is_call_window": False,
+        }
+
+        # Case B: classify_window raises an unexpected exception
+        def _failing_classify(*args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError("Simulated classifier catastrophic failure")
+
+        monkeypatch.setattr(mod, "classify", _failing_classify)
+
+        t1 = t0 + timedelta(minutes=2)
+        # Should not raise exception; span should still be persisted with fallback
+        span_row = await mod.handle_raw_line(
+            "activewindow>>code,crash_test.py\n", now=t1
+        )
+        assert span_row is not None
+        assert len(focus_events) == 2
+        assert focus_events[1].payload["category"] == "unknown"
+        assert focus_events[1].payload["classifier"] == "default"
+
+        span_crash = await db.get_current_window_span()
+        assert span_crash is not None
+        assert span_crash["app_class"] == "code"
+        assert span_crash["category"] == "unknown"
+        assert span_crash["classifier"] == "default"
+        assert span_crash["metadata"] == {
+            "category": "unknown",
+            "classifier": "default",
+            "confidence": 0.0,
+            "is_call_window": False,
+        }
+    finally:
+        reader.feed_eof()
+        await mod.stop()
 

@@ -7,7 +7,6 @@ import inspect
 import json
 import logging
 import os
-import re
 from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import suppress
 from datetime import datetime, timedelta
@@ -15,8 +14,14 @@ from pathlib import Path
 from typing import Any
 
 from jarvis.core.bus import EventBus
+from jarvis.core.classification import (
+    DEFAULT_DISTRACTION_TITLE_PATTERNS,
+    DEFAULT_WORK_APP_CLASSES,
+    WindowClassificationResult,
+    classify_window,
+)
 from jarvis.core.database import Database
-from jarvis.core.schema import FocusState, PlatformEvent, ensure_aware, now_local
+from jarvis.core.schema import PlatformEvent, ensure_aware, now_local
 from jarvis.modules.base import BaseModule
 
 logger = logging.getLogger(__name__)
@@ -28,29 +33,6 @@ DEFAULT_RECONNECT_MAX_SECONDS = 30.0
 DEFAULT_RECONNECT_MULTIPLIER = 2.0
 DEFAULT_HYPRCTL_BINARY = "hyprctl"
 DEFAULT_HYPRCTL_TIMEOUT_SECONDS = 3.0
-
-DEFAULT_WORK_APP_CLASSES: tuple[str, ...] = (
-    "code",
-    "Alacritty",
-    "kitty",
-    "obsidian",
-    "Zotero",
-)
-DEFAULT_DISTRACTION_TITLE_PATTERNS: tuple[str, ...] = (
-    "YouTube",
-    "Reddit",
-    "Twitch",
-    "Twitter",
-    "X",
-)
-DEFAULT_CALENDAR_TASK_FOCUS_MAP: dict[str, FocusState] = {
-    "meeting": "neutral",
-    "break": "neutral",
-}
-
-_VALID_FOCUS_STATES: frozenset[str] = frozenset(
-    {"focused", "neutral", "distracted", "unknown"}
-)
 
 HyprctlRunnerResult = (
     dict[str, Any]
@@ -83,16 +65,6 @@ def _parse_dt(value: datetime | str | None) -> datetime | None:
         with suppress(ValueError):
             return ensure_aware(datetime.fromisoformat(value))
     return None
-
-
-def _title_matches_pattern(window_title: str, pattern: str) -> bool:
-    cleaned = pattern.strip()
-    if not cleaned or not window_title:
-        return False
-    if len(cleaned) <= 2:
-        token_re = rf"(?<![A-Za-z0-9]){re.escape(cleaned)}(?![A-Za-z0-9])"
-        return bool(re.search(token_re, window_title, re.IGNORECASE))
-    return cleaned.lower() in window_title.lower()
 
 
 def resolve_hyprland_socket2_path(
@@ -154,67 +126,6 @@ def parse_socket2_line(raw_line: str | bytes) -> tuple[str, str] | None:
         app_class, window_title = raw_payload.split(",", 1)
         return (app_class, window_title)
     return (raw_payload, "")
-
-
-def classify_window(
-    app_class: str,
-    window_title: str,
-    *,
-    work_app_classes: Sequence[str] = DEFAULT_WORK_APP_CLASSES,
-    distraction_title_patterns: Sequence[str] = DEFAULT_DISTRACTION_TITLE_PATTERNS,
-    distraction_app_classes: Sequence[str] = (),
-    neutral_app_classes: Sequence[str] = (),
-    work_title_patterns: Sequence[str] = (),
-    neutral_title_patterns: Sequence[str] = (),
-    calendar_task_type: str | None = None,
-    calendar_task_focus_map: Mapping[str, FocusState] | None = None,
-) -> tuple[FocusState, str]:
-    """Classify a window into `(FocusState, classifier)` per SPEC.MD FR-09.1 precedence."""
-    clean_class = app_class.strip()
-    clean_title = window_title.strip()
-    if not clean_class and not clean_title:
-        return ("neutral", "desktop")
-
-    # 1. App-class rules
-    lowered_class = clean_class.lower()
-    if lowered_class:
-        if any(lowered_class == str(c).strip().lower() for c in work_app_classes if str(c).strip()):
-            return ("focused", "app_class")
-        if any(
-            lowered_class == str(c).strip().lower()
-            for c in distraction_app_classes
-            if str(c).strip()
-        ):
-            return ("distracted", "app_class")
-        if any(
-            lowered_class == str(c).strip().lower()
-            for c in neutral_app_classes
-            if str(c).strip()
-        ):
-            return ("neutral", "app_class")
-
-    # 2. Title rules
-    if clean_title:
-        if any(_title_matches_pattern(clean_title, str(p)) for p in distraction_title_patterns):
-            return ("distracted", "title_pattern")
-        if any(_title_matches_pattern(clean_title, str(p)) for p in work_title_patterns):
-            return ("focused", "title_pattern")
-        if any(_title_matches_pattern(clean_title, str(p)) for p in neutral_title_patterns):
-            return ("neutral", "title_pattern")
-
-    # 3. Calendar-task mappings
-    task_map = (
-        calendar_task_focus_map
-        if calendar_task_focus_map is not None
-        else DEFAULT_CALENDAR_TASK_FOCUS_MAP
-    )
-    if calendar_task_type:
-        mapped = task_map.get(calendar_task_type.strip().lower())
-        if mapped in _VALID_FOCUS_STATES:
-            return (mapped, "calendar_task")
-
-    # 4. Fallback
-    return ("unknown", "default")
 
 
 async def _iter_stream_reader(reader: asyncio.StreamReader) -> AsyncIterator[bytes]:
@@ -479,39 +390,50 @@ class HyprlandIpcModule(BaseModule):
             return [str(item) for item in raw]
         return list(DEFAULT_DISTRACTION_TITLE_PATTERNS)
 
+    def _get_optional_str_list(self, key: str) -> list[str] | None:
+        raw = self._get_config_value(key)
+        if raw is not None and isinstance(raw, Sequence) and not isinstance(raw, (str, bytes)):
+            return [str(item) for item in raw]
+        return None
+
     def classify(
         self,
         app_class: str,
         window_title: str,
         *,
         calendar_task_type: str | None = None,
-    ) -> tuple[FocusState, str]:
-        """Classify `(app_class, window_title)` using configured FocusSettings rules."""
-        distraction_classes = self._get_str_list("distraction_app_classes")
-        neutral_classes = self._get_str_list("neutral_app_classes")
-        work_titles = self._get_str_list("work_title_patterns")
-        neutral_titles = self._get_str_list("neutral_title_patterns")
+        active_task_type: str | None = None,
+    ) -> WindowClassificationResult:
+        """Classify `(app_class, window_title)` using shared classify_window."""
+        distraction_classes = self._get_optional_str_list("distraction_app_classes")
+        neutral_classes = self._get_optional_str_list("neutral_app_classes")
+        work_titles = self._get_optional_str_list("work_title_patterns")
+        neutral_titles = self._get_optional_str_list("neutral_title_patterns")
+        call_apps = self._get_optional_str_list("call_app_classes")
+        call_titles = self._get_optional_str_list("call_title_patterns")
 
-        raw_task_map = self._get_config_value("calendar_task_focus_map")
-        task_map: dict[str, FocusState] | None = None
-        if isinstance(raw_task_map, Mapping):
-            task_map = {
-                str(k).strip().lower(): v
-                for k, v in raw_task_map.items()
-                if v in _VALID_FOCUS_STATES
-            }
+        raw_app_rules = self._get_config_value("app_class_rules")
+        app_rules: Mapping[str, str] | None = (
+            raw_app_rules if isinstance(raw_app_rules, Mapping) else None
+        )
+
+        effective_task = active_task_type or calendar_task_type
 
         return classify_window(
             app_class,
             window_title,
+            active_task_type=effective_task,
+            calendar_task_type=effective_task,
             work_app_classes=self.work_app_classes(),
             distraction_title_patterns=self.distraction_title_patterns(),
             distraction_app_classes=distraction_classes,
             neutral_app_classes=neutral_classes,
             work_title_patterns=work_titles,
             neutral_title_patterns=neutral_titles,
-            calendar_task_type=calendar_task_type,
-            calendar_task_focus_map=task_map,
+            call_app_classes=call_apps,
+            call_title_patterns=call_titles,
+            app_class_rules=app_rules,
+            settings=self.config,
         )
 
     async def handle_raw_line(
@@ -579,6 +501,26 @@ class HyprlandIpcModule(BaseModule):
                 else None
             )
 
+            try:
+                classification = self.classify(
+                    app_class,
+                    window_title,
+                    calendar_task_type=calendar_task_type,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "classify_window failed for %r / %r: %s",
+                    app_class,
+                    window_title,
+                    exc,
+                )
+                classification = WindowClassificationResult(
+                    category="unknown",
+                    classifier="default",
+                    is_call_window=False,
+                    confidence=0.0,
+                )
+
             # Empty / desktop focus: close open window span without inserting a blank row
             if not app_class.strip() and not window_title.strip():
                 if self._db_connected():
@@ -593,9 +535,9 @@ class HyprlandIpcModule(BaseModule):
                             "app_class": "",
                             "title": "",
                             "window_title": "",
-                            "category": "neutral",
-                            "focus": "neutral",
-                            "classifier": "desktop",
+                            "category": classification.category,
+                            "focus": classification.category,
+                            "classifier": classification.classifier,
                             "calendar_event_id": calendar_event_id,
                             "span_id": None,
                         },
@@ -603,11 +545,17 @@ class HyprlandIpcModule(BaseModule):
                 )
                 return None
 
-            category, classifier = self.classify(
-                app_class,
-                window_title,
-                calendar_task_type=calendar_task_type,
-            )
+            category = classification.category
+            classifier = classification.classifier
+            confidence = classification.confidence
+            is_call_window = classification.is_call_window
+
+            metadata = {
+                "category": category,
+                "classifier": classifier,
+                "confidence": confidence,
+                "is_call_window": is_call_window,
+            }
 
             span_row: dict[str, Any] | None = None
             span_id: int | None = None
@@ -619,6 +567,7 @@ class HyprlandIpcModule(BaseModule):
                     classifier=classifier,
                     calendar_event_id=calendar_event_id,
                     started_at=event_time,
+                    metadata=metadata,
                 )
                 span_id = int(span_row["id"])
                 if not self._degraded_reported:
