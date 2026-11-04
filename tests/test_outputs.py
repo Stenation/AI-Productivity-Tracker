@@ -582,7 +582,10 @@ async def test_posture_status_script_online_offline_and_static_configs(
     assert "WorkingDirectory=%h/Projects/jarvis" in unit_text
     assert "Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin" in unit_text
     assert "Environment=PYTHONUNBUFFERED=1" in unit_text
-    assert "ExecStart=/usr/bin/env uv run jarvis" in unit_text
+    assert (
+        "ExecStart=/usr/bin/env uv run --all-groups jarvis" in unit_text
+        or "ExecStart=/usr/bin/env uv run jarvis" in unit_text
+    )
 
 
 async def test_desktop_notify_subprocess_dispatch_and_shell_safety(

@@ -240,11 +240,24 @@ class StateResolver:
                 return
             self._override_expires_at = None
 
+        is_discrete = (
+            bool(event.payload.get("discrete"))
+            or event.source in ("hyprland_idle", "idle_monitor")
+            or event.payload.get("reason") in ("idle_timeout", "input_resumed")
+        )
+
+        incoming_reason = str(
+            event.payload.get("reason")
+            or ("idle_timeout" if activity == "away" else "sensor_consensus")
+        )
+
         await self._evaluate_sensor_report(
             activity=activity,
             source=event.source,
             confidence=event.confidence,
             event_time=event_time,
+            discrete=is_discrete,
+            reason=incoming_reason,
         )
 
     async def _apply_manual_override(
@@ -304,6 +317,8 @@ class StateResolver:
         source: str,
         confidence: float,
         event_time: datetime,
+        discrete: bool = False,
+        reason: str = "sensor_consensus",
     ) -> None:
         incoming_priority = _sensor_priority(source)
 
@@ -347,7 +362,11 @@ class StateResolver:
             confidence=confidence,
             timestamp=event_time,
         )
-        self._sensor_window.append(sample)
+        if discrete:
+            self._sensor_window.clear()
+            self._sensor_window.extend([sample] * required_samples)
+        else:
+            self._sensor_window.append(sample)
 
         strong_samples = [
             s
@@ -381,7 +400,7 @@ class StateResolver:
             activity=winning_activity,
             source=winning_source,
             confidence=avg_confidence,
-            reason="sensor_consensus",
+            reason=reason,
             started_at=event_time,
             override_expires_at=None,
             metadata={

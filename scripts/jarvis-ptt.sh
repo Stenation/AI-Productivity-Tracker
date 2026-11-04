@@ -23,9 +23,9 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 # Run jarvis-ptt via uv or virtual environment
 if command -v uv >/dev/null 2>&1; then
-    exec uv run --project "${PROJECT_ROOT}" jarvis-ptt "$@"
+    exec uv run --all-groups --project "${PROJECT_ROOT}" jarvis-ptt "$@"
 elif [ -x "${HOME}/.local/bin/uv" ]; then
-    exec "${HOME}/.local/bin/uv" run --project "${PROJECT_ROOT}" jarvis-ptt "$@"
+    exec "${HOME}/.local/bin/uv" run --all-groups --project "${PROJECT_ROOT}" jarvis-ptt "$@"
 elif [ -x "${PROJECT_ROOT}/.venv/bin/jarvis-ptt" ]; then
     exec "${PROJECT_ROOT}/.venv/bin/jarvis-ptt" "$@"
 else

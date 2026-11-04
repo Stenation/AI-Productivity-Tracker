@@ -8,7 +8,7 @@ Type=simple
 WorkingDirectory=%h/Projects/jarvis
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/usr/bin/env uv run jarvis
+ExecStart=/usr/bin/env uv run --all-groups jarvis
 Restart=on-failure
 RestartSec=3
 

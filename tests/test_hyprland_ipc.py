@@ -725,10 +725,16 @@ async def test_input_idle_changed_threshold_manual_override_ttl_and_hypridle_con
     )
     await mon_mod.start()
     try:
-        await _wait_until(lambda: len(monitor_reports) == 1)
+        await _wait_until(lambda: len(monitor_reports) >= 1)
         assert monitor_reports[0].source == "hyprland_idle"
         assert monitor_reports[0].payload["activity"] == "away"
         assert monitor_reports[0].confidence == pytest.approx(0.7)
+
+        # And when idle becomes False after away, input_resumed restores desk activity
+        await _wait_until(lambda: len(monitor_reports) == 2)
+        assert monitor_reports[1].source == "hyprland_ipc"
+        assert monitor_reports[1].payload["activity"] == "sitting"
+        assert monitor_reports[1].payload["reason"] == "input_resumed"
     finally:
         reader2.feed_eof()
         await mon_mod.stop()
@@ -993,4 +999,106 @@ async def test_window_classification_failure_and_unknown_preserves_persistence(
     finally:
         reader.feed_eof()
         await mod.stop()
+
+
+async def test_idle_away_and_input_resume_restores_desk_activity(
+    db: Database,
+    test_settings: Settings,
+) -> None:
+    """Verify that discrete idle away and input resume events immediately update StateResolver."""
+    # Ensure default 4-sample consensus is used (not overridden to 1)
+    test_settings.posture.sensor_consensus_samples = 4
+    test_settings.posture.sensor_consensus_window_samples = 10
+
+    t0 = datetime(2026, 11, 4, 15, 0, 0).astimezone()
+    bus = EventBus()
+    resolver = StateResolver(bus=bus, db=db, settings=test_settings)
+    await resolver.start()
+
+    reader = asyncio.StreamReader()
+    mod = HyprlandIpcModule(
+        bus=bus,
+        db=db,
+        config=test_settings.model_dump(),
+        stream_reader=reader,
+        idle_threshold_seconds=300.0,
+    )
+    await mod.start()
+
+    try:
+        # Initial state: user is sitting at desk (e.g. manual report with 0 TTL)
+        await bus.publish(
+            PlatformEvent(
+                type="activity_reported",
+                source="manual_control",
+                confidence=1.0,
+                timestamp=t0,
+                payload={"activity": "sitting", "ttl_minutes": 0, "reason": "manual_override"},
+            )
+        )
+        assert resolver.get_effective_state(now=t0).activity == "sitting"
+
+        # 1. Idle exceeds 300s threshold -> emits away with discrete=True
+        # Resolver transitions to away immediately
+        t_away = t0 + timedelta(minutes=6)
+        await bus.publish(
+            PlatformEvent(
+                type="input_idle_changed",
+                source="hypridle",
+                timestamp=t_away,
+                payload={"idle": True, "idle_seconds": 305},
+            )
+        )
+        assert resolver.get_effective_state(now=t_away).activity == "away"
+        assert resolver.get_effective_state(now=t_away).reason == "idle_timeout"
+
+        # 2. Input resumes (e.g. hypridle on-resume) -> emits sitting with discrete=True
+        # Resolver transitions immediately back to sitting
+        t_resume = t_away + timedelta(minutes=5)
+        await bus.publish(
+            PlatformEvent(
+                type="input_idle_changed",
+                source="hypridle",
+                timestamp=t_resume,
+                payload={"idle": False, "idle_seconds": 0},
+            )
+        )
+        assert resolver.get_effective_state(now=t_resume).activity == "sitting"
+        assert resolver.get_effective_state(now=t_resume).reason == "input_resumed"
+
+        # 3. User switches to standing
+        t_stand = t_resume + timedelta(minutes=2)
+        await bus.publish(
+            PlatformEvent(
+                type="activity_reported",
+                source="manual_control",
+                confidence=1.0,
+                timestamp=t_stand,
+                payload={"activity": "standing", "ttl_minutes": 0, "reason": "manual_override"},
+            )
+        )
+        assert resolver.get_effective_state(now=t_stand).activity == "standing"
+
+        # 4. User steps away again -> away
+        t_away2 = t_stand + timedelta(minutes=10)
+        await bus.publish(
+            PlatformEvent(
+                type="input_idle_changed",
+                source="hypridle",
+                timestamp=t_away2,
+                payload={"idle": True, "idle_seconds": 310},
+            )
+        )
+        assert resolver.get_effective_state(now=t_away2).activity == "away"
+
+        # 5. User returns and focuses an active window -> restores last desk activity (standing!)
+        t_focus = t_away2 + timedelta(minutes=3)
+        await mod.handle_raw_line("activewindow>>code,main.py\n", now=t_focus)
+        assert resolver.get_effective_state(now=t_focus).activity == "standing"
+        assert resolver.get_effective_state(now=t_focus).reason == "input_resumed"
+    finally:
+        reader.feed_eof()
+        await mod.stop()
+        await resolver.stop()
+
 

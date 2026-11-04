@@ -89,12 +89,20 @@ class ModuleRegistry:
                 )
 
     async def start_all(self) -> dict[str, str]:
-        """Enable and start all modules configured in settings.enabled_modules."""
+        """Enable and start modules, respecting persisted DB overrides when present."""
         statuses: dict[str, str] = {}
         for category in STARTUP_CATEGORY_ORDER:
-            configured: list[str] = getattr(self._settings.enabled_modules, category, [])
+            configured: list[str] = list(getattr(self._settings.enabled_modules, category, []))
+            for name in list(KNOWN_MODULE_CATEGORIES.keys()):
+                if self._resolve_category(name) == category:
+                    persisted = await self._db.get_setting(f"module.{name}.enabled")
+                    if persisted is True and name not in configured:
+                        configured.append(name)
+                    elif persisted is False and name in configured:
+                        configured.remove(name)
+
             for name in configured:
-                await self.enable_module(name, category=category)
+                await self.enable_module(name, category=category, persist=False)
                 record = self._records.get(name)
                 statuses[name] = record.status if record is not None else "degraded"
         return statuses
@@ -141,10 +149,13 @@ class ModuleRegistry:
         name: str,
         *,
         category: ModuleCategory | None = None,
+        persist: bool = True,
     ) -> bool:
         """Import, instantiate, and start `name`, recording degraded health on error."""
         existing = self._records.get(name)
         if existing is not None and existing.enabled and existing.instance is not None:
+            if persist:
+                await self._db.set_setting(f"module.{name}.enabled", True)
             return True
 
         resolved_category = (
@@ -203,9 +214,11 @@ class ModuleRegistry:
             status="ok",
             last_error=None,
         )
+        if persist:
+            await self._db.set_setting(f"module.{name}.enabled", True)
         return True
 
-    async def disable_module(self, name: str) -> bool:
+    async def disable_module(self, name: str, *, persist: bool = True) -> bool:
         """Stop a running module and mark it disabled in memory and SQLite."""
         record = self._records.get(name)
         if record is None:
@@ -236,6 +249,8 @@ class ModuleRegistry:
             status="disabled",
             last_error=None,
         )
+        if persist:
+            await self._db.set_setting(f"module.{name}.enabled", False)
         return True
 
     def is_enabled(self, name: str) -> bool:

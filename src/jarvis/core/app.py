@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -44,6 +45,39 @@ def create_app(
         )
         await db.connect(run_migrations=True)
         migrations = await get_applied_migrations(db.connection)
+
+        # Prune historical data past retention window
+        if resolved_settings.privacy.retention_days > 0:
+            try:
+                await db.prune_retention(resolved_settings.privacy.retention_days)
+            except Exception as exc:
+                logging.getLogger(__name__).warning("Failed to prune retention on startup: %s", exc)
+
+        # Restore persisted runtime privacy overrides
+        persisted_pause = await db.get_setting("privacy.global_pause")
+        if isinstance(persisted_pause, bool):
+            resolved_settings.privacy.global_pause = persisted_pause
+
+        persisted_dnd = await db.get_setting("privacy.dnd_mode")
+        if isinstance(persisted_dnd, bool):
+            resolved_settings.privacy.dnd_mode = persisted_dnd
+
+        persisted_tts = await db.get_setting("privacy.allow_tts")
+        if isinstance(persisted_tts, bool):
+            resolved_settings.privacy.allow_tts = persisted_tts
+
+        persisted_mic = await db.get_setting("privacy.microphone_mode")
+        if isinstance(persisted_mic, str) and persisted_mic in ("push_to_talk", "disabled"):
+            resolved_settings.privacy.microphone_mode = persisted_mic
+
+        # Restore persisted runtime LLM overrides
+        persisted_model = await db.get_setting("llm.text_model")
+        if isinstance(persisted_model, str) and persisted_model.strip():
+            resolved_settings.llm.text_model = persisted_model.strip()
+
+        persisted_keep_alive = await db.get_setting("llm.keep_alive")
+        if isinstance(persisted_keep_alive, str) and persisted_keep_alive.strip():
+            resolved_settings.llm.keep_alive = persisted_keep_alive.strip()
 
         bus = EventBus()
         timer_manager = TimerManager(bus=bus, db=db, settings=resolved_settings)

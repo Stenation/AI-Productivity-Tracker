@@ -204,6 +204,7 @@ class HyprlandIpcModule(BaseModule):
         self._idle: bool = False
         self._idle_since: datetime | None = None
         self._away_emitted: bool = False
+        self._last_desk_activity: str = "sitting"
 
         self._window_lock = asyncio.Lock()
         self._active_writer: asyncio.StreamWriter | None = None
@@ -235,6 +236,12 @@ class HyprlandIpcModule(BaseModule):
         self._dnd_mode = self._extract_dnd_mode(self.config)
 
         if self._db_connected():
+            try:
+                current_span = await self.db.get_current_activity_span()
+                if current_span and current_span.get("activity") in ("sitting", "standing"):
+                    self._last_desk_activity = str(current_span["activity"])
+            except Exception:
+                pass
             persisted_pause = await self.db.get_setting("privacy.global_pause")
             if isinstance(persisted_pause, bool):
                 self._privacy_paused = self._privacy_paused or persisted_pause
@@ -245,6 +252,7 @@ class HyprlandIpcModule(BaseModule):
         self.bus.subscribe("input_idle_changed", self._on_input_idle_changed)
         self.bus.subscribe("privacy_mode_changed", self._on_privacy_mode_changed)
         self.bus.subscribe("calendar_context_changed", self._on_calendar_context_changed)
+        self.bus.subscribe("activity_state_changed", self._on_activity_state_changed)
 
         self._running = True
         self._last_error = None
@@ -288,6 +296,7 @@ class HyprlandIpcModule(BaseModule):
         self.bus.unsubscribe("input_idle_changed", self._on_input_idle_changed)
         self.bus.unsubscribe("privacy_mode_changed", self._on_privacy_mode_changed)
         self.bus.unsubscribe("calendar_context_changed", self._on_calendar_context_changed)
+        self.bus.unsubscribe("activity_state_changed", self._on_activity_state_changed)
 
         await self._cancel_background_tasks()
         await self._close_active_writer()
@@ -471,6 +480,11 @@ class HyprlandIpcModule(BaseModule):
             idle_since=self._idle_since,
         )
 
+    async def _on_activity_state_changed(self, event: PlatformEvent) -> None:
+        act = str(event.payload.get("activity", ""))
+        if act in ("sitting", "standing"):
+            self._last_desk_activity = act
+
     async def _process_active_window(
         self,
         *,
@@ -481,6 +495,28 @@ class HyprlandIpcModule(BaseModule):
         async with self._window_lock:
             if self._privacy_paused:
                 return None
+
+            if self._idle or self._idle_since is not None or self._away_emitted:
+                was_away = bool(self._away_emitted)
+                self._away_emitted = False
+                self._idle = False
+                self._idle_since = None
+                await self._cancel_idle_timer()
+                if was_away:
+                    resume_act = self._last_desk_activity or "sitting"
+                    await self.bus.publish(
+                        PlatformEvent(
+                            type="activity_reported",
+                            source=self.name,
+                            confidence=0.8,
+                            timestamp=event_time,
+                            payload={
+                                "activity": resume_act,
+                                "reason": "input_resumed",
+                                "discrete": True,
+                            },
+                        )
+                    )
 
             pair = (app_class, window_title)
             if self._last_window == pair:
@@ -626,10 +662,26 @@ class HyprlandIpcModule(BaseModule):
         self._last_event_at = event_time
 
         if not bool(raw_idle):
+            was_away = bool(self._away_emitted)
             self._idle = False
             self._idle_since = None
             self._away_emitted = False
             await self._cancel_idle_timer()
+            if was_away:
+                resume_act = self._last_desk_activity or "sitting"
+                await self.bus.publish(
+                    PlatformEvent(
+                        type="activity_reported",
+                        source=self.name,
+                        confidence=0.8,
+                        timestamp=event_time,
+                        payload={
+                            "activity": resume_act,
+                            "reason": "input_resumed",
+                            "discrete": True,
+                        },
+                    )
+                )
             return None
 
         idle_since_dt = _parse_dt(payload.get("idle_since"))
@@ -688,6 +740,8 @@ class HyprlandIpcModule(BaseModule):
                 "activity": "away",
                 "idle_seconds": round(idle_seconds, 3),
                 "idle_since": idle_since.isoformat(),
+                "discrete": True,
+                "reason": "idle_timeout",
             },
         )
         await self.bus.publish(event)

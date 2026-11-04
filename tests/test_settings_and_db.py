@@ -484,3 +484,109 @@ async def test_calendar_cache_module_health_and_settings(db: Database) -> None:
     await db.set_setting("calibration", {"sit_y": 0.61, "stand_y": 0.42})
     assert await db.get_setting("calibration") == {"sit_y": 0.61, "stand_y": 0.42}
 
+
+async def test_database_prune_retention(db: Database) -> None:
+    now = datetime(2026, 11, 4, 12, 0, 0, tzinfo=UTC)
+    old_time = now - timedelta(days=100)
+    recent_time = now - timedelta(days=30)
+
+    # Old closed activity span vs recent closed activity span vs open activity span
+    await db.open_activity_span(
+        activity="sitting",
+        source="manual",
+        confidence=1.0,
+        reason="manual_override",
+        started_at=old_time,
+    )
+    await db.close_current_activity_span(ended_at=old_time + timedelta(hours=1))
+
+    await db.open_activity_span(
+        activity="standing",
+        source="manual",
+        confidence=1.0,
+        reason="manual_override",
+        started_at=recent_time,
+    )
+    await db.close_current_activity_span(ended_at=recent_time + timedelta(hours=1))
+
+    # Currently open span (ended_at IS NULL)
+    await db.open_activity_span(
+        activity="walking",
+        source="manual",
+        confidence=1.0,
+        reason="manual_override",
+        started_at=old_time - timedelta(days=5),
+    )
+
+    # Window spans
+    await db.open_window_span(
+        app_class="code",
+        window_title="old",
+        category="coding",
+        started_at=old_time,
+    )
+    await db.close_current_window_span(ended_at=old_time + timedelta(minutes=30))
+
+    await db.open_window_span(
+        app_class="code",
+        window_title="recent",
+        category="coding",
+        started_at=recent_time,
+    )
+    await db.close_current_window_span(ended_at=recent_time + timedelta(minutes=30))
+
+    # Recommendations
+    old_rec = await db.create_recommendation(
+        policy="posture_policy",
+        suggested_action="suggest_stand",
+        message="Stand up",
+        created_at=old_time,
+    )
+    await db.resolve_recommendation(int(old_rec["id"]), "accepted")
+
+    pending_rec = await db.create_recommendation(
+        policy="posture_policy",
+        suggested_action="suggest_sit",
+        message="Sit down",
+        created_at=old_time,
+    )
+
+    # Prune 90-day retention
+    counts = await db.prune_retention(retention_days=90, now=now)
+    assert counts.get("activity_spans") == 1
+    assert counts.get("window_spans") == 1
+    assert counts.get("recommendations") == 1
+
+    # Remaining spans: recent span and open span preserved
+    remaining_activity = await db.list_activity_spans(limit=10)
+    assert len(remaining_activity) == 2
+    activities = {r["activity"] for r in remaining_activity}
+    assert activities == {"standing", "walking"}
+
+    # Pending recommendation preserved even if created_at is old
+    remaining_recs = await db.list_recommendations(limit=10)
+    assert len(remaining_recs) == 1
+    assert remaining_recs[0]["id"] == pending_rec["id"]
+
+
+async def test_app_lifespan_pruning_and_persisted_settings(
+    db: Database,
+    test_settings: Settings,
+) -> None:
+    from jarvis.core.app import create_app
+
+    # Seed persisted overrides
+    await db.set_setting("privacy.global_pause", True)
+    await db.set_setting("privacy.allow_tts", True)
+    await db.set_setting("llm.text_model", "qwen3:14b")
+    await db.set_setting("module.manual_control.enabled", True)
+
+    app = create_app(settings=test_settings)
+    async with app.router.lifespan_context(app):
+        # Settings should have been updated from persisted DB values
+        assert app.state.settings.privacy.global_pause is True
+        assert app.state.settings.privacy.allow_tts is True
+        assert app.state.settings.llm.text_model == "qwen3:14b"
+        assert app.state.registry.is_enabled("manual_control") is True
+
+

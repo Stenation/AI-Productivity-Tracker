@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -1145,4 +1145,71 @@ class Database:
             ) as cursor:
                 rows = await cursor.fetchall()
             return [d for r in rows if (d := _row_to_dict(r)) is not None]
+
+    # ------------------------------------------------------------------
+    # Data retention cleanup
+    # ------------------------------------------------------------------
+
+    async def prune_retention(
+        self,
+        retention_days: int,
+        now: datetime | None = None,
+    ) -> dict[str, int]:
+        """Prune historical spans, recommendations, and interactions older than retention_days.
+
+        Returns a dictionary mapping table name to the number of deleted rows.
+        """
+        if retention_days <= 0:
+            return {}
+
+        ref_now = _to_dt(now)
+        cutoff = ref_now - timedelta(days=int(retention_days))
+        cutoff_iso = cutoff.isoformat()
+
+        counts: dict[str, int] = {}
+        async with self._lock:
+            conn = self.connection
+
+            # Prune completed activity spans older than cutoff
+            cur = await conn.execute(
+                "DELETE FROM activity_spans WHERE started_at < ? AND ended_at IS NOT NULL",
+                (cutoff_iso,),
+            )
+            counts["activity_spans"] = cur.rowcount
+
+            # Prune completed window spans older than cutoff
+            cur = await conn.execute(
+                "DELETE FROM window_spans WHERE started_at < ? AND ended_at IS NOT NULL",
+                (cutoff_iso,),
+            )
+            counts["window_spans"] = cur.rowcount
+
+            # Prune completed timer spans older than cutoff
+            cur = await conn.execute(
+                "DELETE FROM timer_spans WHERE started_at < ? AND ended_at IS NOT NULL",
+                (cutoff_iso,),
+            )
+            counts["timer_spans"] = cur.rowcount
+
+            # Prune resolved recommendations older than cutoff
+            cur = await conn.execute(
+                "DELETE FROM recommendations WHERE created_at < ? AND status != 'pending'",
+                (cutoff_iso,),
+            )
+            counts["recommendations"] = cur.rowcount
+
+            # Prune LLM interactions older than cutoff (if table exists)
+            try:
+                cur = await conn.execute(
+                    "DELETE FROM llm_interactions WHERE created_at < ?",
+                    (cutoff_iso,),
+                )
+                counts["llm_interactions"] = cur.rowcount
+            except Exception:
+                pass
+
+            await conn.commit()
+
+        return counts
+
 
