@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -890,6 +891,86 @@ class Database:
         current_event = active_candidates[0][2] if active_candidates else None
         next_event = upcoming_candidates[0][2] if upcoming_candidates else None
         return current_event, next_event
+
+    async def delete_calendar_event(self, event_id: str) -> bool:
+        """Delete a single cached calendar event by event_id."""
+        async with self._lock:
+            conn = self.connection
+            cursor = await conn.execute(
+                "DELETE FROM calendar_cache WHERE event_id = ?",
+                (event_id,),
+            )
+            await conn.commit()
+            return cursor.rowcount > 0
+
+    async def list_calendar_events(
+        self,
+        time_min: datetime | str | None = None,
+        time_max: datetime | str | None = None,
+        calendar_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """List cached calendar events, optionally filtered by overlap window and calendar_id."""
+        query = "SELECT * FROM calendar_cache WHERE 1=1"
+        params: list[Any] = []
+        if calendar_id is not None:
+            query += " AND calendar_id = ?"
+            params.append(calendar_id)
+        if time_min is not None:
+            query += " AND end_time > ?"
+            params.append(_to_iso(time_min))
+        if time_max is not None:
+            query += " AND start_time < ?"
+            params.append(_to_iso(time_max))
+        query += " ORDER BY start_time ASC"
+
+        async with self._lock:
+            async with self.connection.execute(query, tuple(params)) as cursor:
+                rows = await cursor.fetchall()
+            return [d for r in rows if (d := _row_to_dict(r)) is not None]
+
+    async def prune_stale_calendar_events(
+        self,
+        time_min: datetime | str,
+        time_max: datetime | str,
+        keep_event_ids: Sequence[str] | set[str],
+        calendar_id: str = "primary",
+    ) -> list[str]:
+        """Prune cached events in [time_min, time_max] not in keep_event_ids.
+
+        Returns list of deleted event_ids.
+        """
+        time_min_iso = _to_iso(time_min)
+        time_max_iso = _to_iso(time_max)
+        keep_set = set(keep_event_ids)
+
+        async with self._lock:
+            conn = self.connection
+            async with conn.execute(
+                """
+                SELECT event_id FROM calendar_cache
+                WHERE calendar_id = ?
+                  AND end_time > ?
+                  AND start_time < ?
+                """,
+                (calendar_id, time_min_iso, time_max_iso),
+            ) as cursor:
+                rows = await cursor.fetchall()
+
+            stale_ids = [
+                str(row["event_id"])
+                for row in rows
+                if row["event_id"] not in keep_set
+            ]
+
+            if stale_ids:
+                placeholders = ",".join("?" for _ in stale_ids)
+                await conn.execute(
+                    f"DELETE FROM calendar_cache WHERE event_id IN ({placeholders})",
+                    tuple(stale_ids),
+                )
+                await conn.commit()
+
+            return stale_ids
 
     # ------------------------------------------------------------------
     # Module health & settings

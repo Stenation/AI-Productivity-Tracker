@@ -92,6 +92,9 @@ focus:
 google_calendar:
   calendar_id: "primary"
   sync_interval_minutes: 15
+  # Path to OAuth client secrets JSON downloaded from Google Cloud Console (required for CLI --auth bootstrap)
+  credentials_path: "~/.config/posture-platform/google-credentials.json"
+  # Path to saved user OAuth token JSON (created with 0600 file permissions by CLI --auth)
   oauth_token_path: "~/.local/share/posture-platform/google-token.json"
   read_only: true
 
