@@ -12,7 +12,7 @@
   <section id="modules-panel"
            class="card col-12"
            hx-get="/partials/modules"
-           hx-trigger="every 3s"
+           hx-trigger="every 3s, modulesChanged from:body"
            hx-swap="innerHTML">
     {% include "_partials/modules_card.html" %}
   </section>
@@ -20,9 +20,103 @@
   <section id="privacy-panel"
            class="card col-6"
            hx-get="/partials/privacy"
-           hx-trigger="every 3s"
+           hx-trigger="every 3s, privacyChanged from:body"
            hx-swap="innerHTML">
     {% include "_partials/privacy_card.html" %}
+  </section>
+
+  <section class="card col-6">
+    <div class="card-header">
+      <h2 class="card-title">Local LLM Runtime Controls</h2>
+      <span class="badge badge-info">{{ llm_cfg.provider }}</span>
+    </div>
+    <form hx-post="/api/settings/llm"
+          hx-target="#llm-settings-status"
+          hx-swap="innerHTML"
+          class="meta-list">
+      <div class="meta-item">
+        <label for="text_model" class="meta-label">Text Model</label>
+        <div style="flex: 1; text-align: right;">
+          <input type="text"
+                 id="text_model"
+                 name="text_model"
+                 value="{{ llm_cfg.text_model }}"
+                 class="input-text mono"
+                 style="width: 100%; max-width: 220px;"
+                 required />
+          <div class="muted small mt-1">
+            Default: <code>qwen3:14b</code> · Low-VRAM: <code>qwen2.5:3b</code>
+          </div>
+        </div>
+      </div>
+      <div class="meta-item">
+        <label for="keep_alive" class="meta-label">Keep-Alive Duration</label>
+        <div style="flex: 1; text-align: right;">
+          <input type="text"
+                 id="keep_alive"
+                 name="keep_alive"
+                 value="{{ llm_cfg.keep_alive }}"
+                 class="input-text mono"
+                 style="width: 100%; max-width: 220px;"
+                 required />
+          <div class="muted small mt-1">e.g. <code>5m</code>, <code>15m</code>, <code>30m</code></div>
+        </div>
+      </div>
+      <div class="meta-item" style="justify-content: flex-end;">
+        <button type="submit" class="btn-primary btn-sm">Update LLM Settings</button>
+      </div>
+      <div id="llm-settings-status"></div>
+    </form>
+  </section>
+
+  <section class="card col-12">
+    <div class="card-header">
+      <h2 class="card-title">Optional Feature Onboarding Guide</h2>
+      <span class="badge badge-ok">Step-by-Step Setup</span>
+    </div>
+    <div class="grid">
+      <div class="card col-4">
+        <div class="card-header">
+          <strong>1. Google Calendar</strong>
+          <span class="badge badge-neutral">Read-Only</span>
+        </div>
+        <ol class="small muted" style="padding-left: 1.25rem; line-height: 1.6;">
+          <li>Install dependencies: <code>uv sync --all-groups</code></li>
+          <li>Place OAuth client secrets JSON at <code>~/.config/posture-platform/google-credentials.json</code></li>
+          <li>Run one-time bootstrap: <code>uv run --all-groups jarvis --auth</code></li>
+          <li>Scope must remain strictly <code>calendar.events.readonly</code></li>
+          <li>Enable <code>google_calendar</code> in the Modules list above.</li>
+        </ol>
+      </div>
+
+      <div class="card col-4">
+        <div class="card-header">
+          <strong>2. Local Ollama LLM</strong>
+          <span class="badge badge-info">AMD RX 9070 XT</span>
+        </div>
+        <ol class="small muted" style="padding-left: 1.25rem; line-height: 1.6;">
+          <li>Start Ollama: <code>ollama serve</code></li>
+          <li>Pull default model: <code>ollama pull qwen3:14b</code> (or <code>qwen2.5:3b</code> for low VRAM)</li>
+          <li>Install dependencies: <code>uv sync --all-groups</code></li>
+          <li>Verify host connection at <code>{{ llm_cfg.base_url }}</code></li>
+          <li>Enable <code>llm_ollama</code> in the Modules list above.</li>
+        </ol>
+      </div>
+
+      <div class="card col-4">
+        <div class="card-header">
+          <strong>3. Push-to-Talk Voice &amp; Piper TTS</strong>
+          <span class="badge badge-purple">Local Audio</span>
+        </div>
+        <ol class="small muted" style="padding-left: 1.25rem; line-height: 1.6;">
+          <li>Install dependencies: <code>uv sync --all-groups</code></li>
+          <li>Place <code>.onnx</code> and <code>.onnx.json</code> voice models under <code>~/.local/share/posture-platform/voices/</code></li>
+          <li>Enable <code>privacy.allow_tts</code> in the Privacy panel above.</li>
+          <li>Add a user-chosen Hyprland keybind pointing to <code>scripts/jarvis-ptt.sh</code> (do not hardcode, choose your own key combination in <code>hyprland.conf</code>).</li>
+          <li>Enable <code>tts_piper</code> in the Modules list above.</li>
+        </ol>
+      </div>
+    </div>
   </section>
 
   <section class="card col-6">
@@ -42,6 +136,10 @@
       <div class="meta-item">
         <span class="meta-label">Microphone Mode</span>
         <span class="meta-value mono">{{ privacy.microphone_mode }}</span>
+      </div>
+      <div class="meta-item">
+        <span class="meta-label">Allow TTS Playback</span>
+        <span class="meta-value mono">{{ privacy.allow_tts }}</span>
       </div>
       <div class="meta-item">
         <span class="meta-label">VLM Screenshots</span>
@@ -127,4 +225,3 @@
   </section>
 </div>
 {% endblock %}
-

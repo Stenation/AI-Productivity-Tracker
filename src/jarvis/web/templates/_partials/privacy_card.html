@@ -9,6 +9,14 @@
     {% if privacy.dnd_mode %}
       <span class="badge badge-dnd">DND On</span>
     {% endif %}
+    {% if privacy.allow_tts %}
+      <span class="badge badge-purple">TTS On</span>
+    {% endif %}
+    {% if privacy.microphone_mode == "push_to_talk" %}
+      <span class="badge badge-info">PTT Mic</span>
+    {% else %}
+      <span class="badge badge-neutral">Mic Off</span>
+    {% endif %}
   </div>
 </div>
 
@@ -69,6 +77,70 @@
             hx-target="#privacy-panel"
             hx-swap="innerHTML">
       DND Mode
+    </button>
+  {% endif %}
+</div>
+
+<div class="switch-row">
+  <div>
+    <strong>TTS Playback</strong>
+    <div class="muted">
+      {% if privacy.allow_tts %}
+        Spoken audio playback is allowed through Piper TTS.
+      {% else %}
+        Speech synthesis is muted. Local notifications remain silent.
+      {% endif %}
+    </div>
+  </div>
+  {% if privacy.allow_tts %}
+    <button type="button"
+            class="btn-danger"
+            hx-post="/api/privacy/tts"
+            hx-vals='{"allow_tts": false}'
+            hx-target="#privacy-panel"
+            hx-swap="innerHTML">
+      Disable TTS
+    </button>
+  {% else %}
+    <button type="button"
+            class="btn-success"
+            hx-post="/api/privacy/tts"
+            hx-vals='{"allow_tts": true}'
+            hx-target="#privacy-panel"
+            hx-swap="innerHTML">
+      Allow TTS
+    </button>
+  {% endif %}
+</div>
+
+<div class="switch-row">
+  <div>
+    <strong>Microphone Input</strong>
+    <div class="muted">
+      {% if privacy.microphone_mode == "push_to_talk" %}
+        Push-to-talk voice recording enabled via user keybind.
+      {% else %}
+        Microphone is completely disabled. Voice requests rejected.
+      {% endif %}
+    </div>
+  </div>
+  {% if privacy.microphone_mode == "push_to_talk" %}
+    <button type="button"
+            class="btn-danger"
+            hx-post="/api/privacy/microphone"
+            hx-vals='{"microphone_mode": "disabled"}'
+            hx-target="#privacy-panel"
+            hx-swap="innerHTML">
+      Disable Mic
+    </button>
+  {% else %}
+    <button type="button"
+            class="btn-success"
+            hx-post="/api/privacy/microphone"
+            hx-vals='{"microphone_mode": "push_to_talk"}'
+            hx-target="#privacy-panel"
+            hx-swap="innerHTML">
+      Enable PTT
     </button>
   {% endif %}
 </div>

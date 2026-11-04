@@ -465,6 +465,130 @@ async def build_modules_context(request: Request) -> dict[str, Any]:
     }
 
 
+async def build_focus_context(request: Request) -> dict[str, Any]:
+    """Build template context for the live desktop focus card (FR-08, FR-09)."""
+    settings: Settings = request.app.state.settings
+    db: Database = request.app.state.db
+    resolver: StateResolver = request.app.state.resolver
+    registry: ModuleRegistry = request.app.state.registry
+
+    now = now_local()
+    effective = resolver.get_effective_state(now=now)
+    privacy_paused = bool(settings.privacy.global_pause or effective.privacy_paused)
+
+    focus_mod = registry.get_module("focus_policy")
+    summary: dict[str, Any] = {}
+    if (
+        focus_mod is not None
+        and hasattr(focus_mod, "get_focus_summary")
+        and not privacy_paused
+    ):
+        summary = await focus_mod.get_focus_summary(now=now)
+
+    per_category_durations = summary.get("per_category_durations")
+    if not per_category_durations:
+        per_category_durations = {
+            "focused": 0.0,
+            "neutral": 0.0,
+            "distracted": 0.0,
+            "unknown": 0.0,
+        }
+        if not privacy_paused:
+            spans = await db.list_window_spans(limit=500)
+            for span in spans:
+                cat = str(span.get("category") or "unknown").strip().lower()
+                norm_cat = cat if cat in per_category_durations else "unknown"
+                start_dt = parse_dt(span.get("started_at"))
+                end_dt = parse_dt(span.get("ended_at"))
+                if start_dt is not None:
+                    eff_end = end_dt or now
+                    dur = max(0.0, (eff_end - start_dt).total_seconds())
+                    per_category_durations[norm_cat] = (
+                        per_category_durations.get(norm_cat, 0.0) + dur
+                    )
+
+    current_window = await db.get_current_window_span() if not privacy_paused else None
+    app_class = summary.get("app_class")
+    window_title = summary.get("window_title")
+    category = summary.get("focus_state", "unknown")
+    is_call = bool(summary.get("is_call_window", False))
+
+    if not app_class and current_window is not None:
+        app_class = current_window.get("app_class")
+        window_title = current_window.get("window_title")
+        raw_cat = str(current_window.get("category") or "unknown").strip().lower()
+        category = raw_cat
+        meta = current_window.get("metadata")
+        if isinstance(meta, dict) and "is_call_window" in meta:
+            is_call = bool(meta["is_call_window"])
+
+    category_breakdown = [
+        {
+            "category": cat,
+            "label": cat.capitalize(),
+            "seconds": int(per_category_durations.get(cat, 0.0)),
+            "display": format_duration(int(per_category_durations.get(cat, 0.0))),
+        }
+        for cat in ("focused", "neutral", "distracted", "unknown")
+    ]
+
+    return {
+        "focus_card": {
+            "app_class": app_class if (app_class and not privacy_paused) else "—",
+            "window_title": window_title if (window_title and not privacy_paused) else "—",
+            "category": category if not privacy_paused else "unknown",
+            "category_label": (
+                category.capitalize() if not privacy_paused else "Paused"
+            ),
+            "is_call_window": is_call if not privacy_paused else False,
+            "mode": settings.privacy.hyprland_ipc_mode,
+            "mode_label": (
+                "Observe Only"
+                if settings.privacy.hyprland_ipc_mode == "observe_only"
+                else "Notify"
+            ),
+            "privacy_paused": privacy_paused,
+            "category_breakdown": category_breakdown,
+        }
+    }
+
+
+async def build_ask_context(request: Request) -> dict[str, Any]:
+    """Build template context for the Local AI Assistant & voice PTT card."""
+    settings: Settings = request.app.state.settings
+    resolver: StateResolver = request.app.state.resolver
+    registry: ModuleRegistry = request.app.state.registry
+
+    effective = resolver.get_effective_state()
+    privacy_paused = bool(settings.privacy.global_pause or effective.privacy_paused)
+    dnd_mode = bool(settings.privacy.dnd_mode)
+
+    llm_enabled = registry.is_enabled("llm_ollama")
+    tts_enabled = registry.is_enabled("tts_piper")
+
+    return {
+        "ask": {
+            "llm_enabled": llm_enabled,
+            "model": settings.llm.text_model,
+            "keep_alive": settings.llm.keep_alive,
+            "allow_tts": bool(settings.privacy.allow_tts),
+            "tts_enabled": tts_enabled,
+            "microphone_mode": settings.privacy.microphone_mode,
+            "voice_status_label": (
+                "Push-to-Talk"
+                if settings.privacy.microphone_mode == "push_to_talk"
+                else "Disabled"
+            ),
+            "ptt_keybind_hint": (
+                "Trigger voice input via your configured Hyprland keybind running "
+                "scripts/jarvis-ptt.sh"
+            ),
+            "privacy_paused": privacy_paused,
+            "dnd_mode": dnd_mode,
+        }
+    }
+
+
 async def build_dashboard_context(request: Request) -> dict[str, Any]:
     """Assemble full `/` dashboard template context."""
     posture_ctx = await build_posture_context(request)
@@ -472,6 +596,8 @@ async def build_dashboard_context(request: Request) -> dict[str, Any]:
     calendar_ctx = await build_calendar_context(request)
     recs_ctx = await build_recommendations_context(request)
     privacy_ctx = await build_privacy_context(request)
+    focus_ctx = await build_focus_context(request)
+    ask_ctx = await build_ask_context(request)
 
     return {
         "active_page": "dashboard",
@@ -480,6 +606,8 @@ async def build_dashboard_context(request: Request) -> dict[str, Any]:
         **calendar_ctx,
         **recs_ctx,
         **privacy_ctx,
+        **focus_ctx,
+        **ask_ctx,
     }
 
 
@@ -587,13 +715,94 @@ async def build_history_context(request: Request) -> dict[str, Any]:
             }
         )
 
+    # Focus category breakdown for today
+    focus_seconds: dict[str, int] = {
+        "focused": 0,
+        "neutral": 0,
+        "distracted": 0,
+        "unknown": 0,
+    }
+    today_window_spans = await db.list_window_spans(since=today_start, limit=1000)
+    for wspan in today_window_spans:
+        cat = str(wspan.get("category") or "unknown").strip().lower()
+        norm_cat = cat if cat in focus_seconds else "unknown"
+        ws_dt = parse_dt(wspan.get("started_at"))
+        if ws_dt is None:
+            continue
+        we_dt = parse_dt(wspan.get("ended_at")) or now
+        c_start = max(ws_dt, today_start)
+        c_end = min(we_dt, now)
+        dur = max(0, int((c_end - c_start).total_seconds()))
+        focus_seconds[norm_cat] = focus_seconds.get(norm_cat, 0) + dur
+
+    focus_category_totals = [
+        {
+            "category": key,
+            "label": key.capitalize(),
+            "seconds": focus_seconds.get(key, 0),
+            "display": format_duration(focus_seconds.get(key, 0)),
+        }
+        for key in ("focused", "neutral", "distracted", "unknown")
+    ]
+
+    # Recent window spans with calendar-block correlation
+    raw_window_spans = await db.list_window_spans(limit=50)
+    window_spans: list[dict[str, Any]] = []
+    for row in raw_window_spans:
+        s_dt = parse_dt(row.get("started_at"))
+        e_dt = parse_dt(row.get("ended_at"))
+        end_ref = e_dt or now
+        dur_sec = max(0, int((end_ref - s_dt).total_seconds())) if s_dt else 0
+        cat = str(row.get("category") or "unknown")
+        meta = row.get("metadata")
+        is_call = bool(meta.get("is_call_window")) if isinstance(meta, dict) else False
+        window_spans.append(
+            {
+                "id": row.get("id"),
+                "app_class": row.get("app_class") or "—",
+                "window_title": row.get("window_title") or "—",
+                "category": cat,
+                "category_label": cat.capitalize(),
+                "classifier": row.get("classifier") or "default",
+                "calendar_event_id": row.get("calendar_event_id") or "—",
+                "started_display": format_timestamp(s_dt),
+                "ended_display": format_timestamp(e_dt) if e_dt else "Active now",
+                "is_open": e_dt is None,
+                "duration_display": format_duration(dur_sec),
+                "is_call_window": is_call,
+            }
+        )
+
+    # Recent LLM Q&A interactions
+    raw_llm = await db.list_llm_interactions(limit=25)
+    llm_interactions: list[dict[str, Any]] = []
+    for row in raw_llm:
+        lat = row.get("latency_ms")
+        llm_interactions.append(
+            {
+                "id": row.get("id"),
+                "source": row.get("source") or "dashboard",
+                "question": row.get("question") or "",
+                "answer": row.get("answer") or "",
+                "suggested_action": row.get("suggested_action") or "—",
+                "model": row.get("model") or "unknown",
+                "latency_ms": lat,
+                "latency_display": f"{lat}ms" if lat is not None else "—",
+                "created_display": format_timestamp(row.get("created_at")),
+            }
+        )
+
     return {
         "active_page": "history",
         "today_date": now.strftime("%Y-%m-%d"),
         "daily_totals": daily_totals,
         "activity_spans": activity_spans,
         "timer_spans": timer_spans,
+        "desktop_countdown_spans": timer_spans,
         "recommendation_history": recommendation_history,
+        "focus_category_totals": focus_category_totals,
+        "window_spans": window_spans,
+        "llm_interactions": llm_interactions,
     }
 
 
@@ -638,6 +847,28 @@ async def build_settings_context(request: Request) -> dict[str, Any]:
             ],
         },
         "focus_cfg": settings.focus.model_dump(),
+        "llm_cfg": {
+            "text_model": settings.llm.text_model,
+            "keep_alive": settings.llm.keep_alive,
+            "provider": settings.llm.provider,
+            "base_url": settings.llm.base_url,
+            "recommended_models": [
+                {
+                    "id": "qwen3:14b",
+                    "label": "qwen3:14b (Default - 16 GB VRAM)",
+                },
+                {
+                    "id": "qwen2.5:3b",
+                    "label": "qwen2.5:3b (Lightweight low-VRAM alternative)",
+                },
+            ],
+        },
+        "voice_cfg": {
+            "ptt_state_file": str(settings.voice.ptt_state_file),
+            "voice_model_path": str(settings.tts.voice_model_path),
+            "microphone_mode": settings.privacy.microphone_mode,
+            "allow_tts": settings.privacy.allow_tts,
+        },
         "waybar_cfg": {
             "status_file": str(settings.waybar.status_file),
             "refresh_interval_seconds": settings.waybar.refresh_interval_seconds,

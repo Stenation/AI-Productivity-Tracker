@@ -6,8 +6,10 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 
 from jarvis.web.views import (
+    build_ask_context,
     build_calendar_context,
     build_dashboard_context,
+    build_focus_context,
     build_history_context,
     build_modules_context,
     build_posture_context,
@@ -89,4 +91,18 @@ async def modules_partial(request: Request) -> HTMLResponse:
     """Render HTMX partial for live module enable/disable controls and health status."""
     context = await build_modules_context(request)
     return render_template(request, "_partials/modules_card.html", context)
+
+
+@router.get("/partials/focus", response_class=HTMLResponse)
+async def focus_partial(request: Request) -> HTMLResponse:
+    """Render HTMX partial for live desktop focus context and observe-only mode."""
+    context = await build_focus_context(request)
+    return render_template(request, "_partials/focus_card.html", context)
+
+
+@router.get("/partials/ask", response_class=HTMLResponse)
+async def ask_partial(request: Request) -> HTMLResponse:
+    """Render HTMX partial for local AI assistant and push-to-talk voice status."""
+    context = await build_ask_context(request)
+    return render_template(request, "_partials/ask_card.html", context)
 

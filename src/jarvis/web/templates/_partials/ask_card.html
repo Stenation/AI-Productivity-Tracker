@@ -1,0 +1,52 @@
+<div class="card-header">
+  <h2 class="card-title">Local AI Assistant &amp; Voice</h2>
+  <div class="btn-row">
+    {% if ask.llm_enabled %}
+      <span class="badge badge-ok">LLM Active ({{ ask.model }})</span>
+    {% else %}
+      <span class="badge badge-neutral">LLM Disabled</span>
+    {% endif %}
+    <span class="badge {% if ask.microphone_mode == 'push_to_talk' %}badge-info{% else %}badge-neutral{% endif %}">
+      Mic: {{ ask.voice_status_label }}
+    </span>
+    <span class="badge {% if ask.allow_tts %}badge-purple{% else %}badge-neutral{% endif %}">
+      TTS: {% if ask.allow_tts %}Enabled{% else %}Disabled{% endif %}
+    </span>
+  </div>
+</div>
+
+{% if ask.llm_enabled %}
+  <form hx-post="/api/ask"
+        hx-target="#ask-response"
+        hx-swap="innerHTML"
+        class="ask-form">
+    <div class="input-group">
+      <input type="text"
+             name="question"
+             placeholder="Ask assistant about your posture, focus, or schedule..."
+             required
+             class="input-text" />
+      <button type="submit" class="btn-primary">Ask</button>
+    </div>
+    <div class="ask-options">
+      <label class="checkbox-label">
+        <input type="checkbox" name="speak" value="true" {% if not ask.allow_tts %}disabled title="Enable allow_tts in Settings to speak"{% endif %} />
+        <span>Speak response (TTS)</span>
+      </label>
+      <span class="muted small mono">Keep-alive: {{ ask.keep_alive }}</span>
+    </div>
+  </form>
+
+  <div id="ask-response" class="mt-2"></div>
+{% else %}
+  <div class="empty-state">
+    Local LLM Assistant is currently disabled.
+    <a href="/settings" class="link-primary">Enable llm_ollama in Settings</a> to enable natural-language Q&amp;A.
+  </div>
+{% endif %}
+
+<div class="voice-hint mt-2">
+  <div class="muted small">
+    <strong>Voice Input:</strong> {{ ask.ptt_keybind_hint }}.
+  </div>
+</div>

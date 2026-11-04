@@ -243,4 +243,5 @@ class LlmOllamaModule(BaseModule):
             "confidence": res["confidence"],
             "model": res["model"],
             "interaction_id": interaction_id,
+            "latency_ms": res.get("latency_ms"),
         }

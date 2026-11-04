@@ -167,6 +167,8 @@ class PomodoroSettings(BaseModel):
 class FocusSettings(BaseModel):
     model_config = ConfigDict(validate_default=True, extra="ignore")
 
+    socket_path: Path | None = None
+    seed_active_window: bool | None = None
     distraction_grace_seconds: int = Field(default=180, ge=0)
     phone_unlock_limit_seconds: int = Field(default=60, ge=0)
     max_prompts_per_hour: int = Field(default=4, ge=0)

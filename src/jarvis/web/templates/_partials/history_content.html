@@ -9,6 +9,23 @@
     </section>
   {% endfor %}
 
+  {% if focus_category_totals %}
+    <section class="card col-12">
+      <div class="card-header">
+        <h2 class="card-title">Today's Focus Category Durations</h2>
+        <span class="badge badge-info">Observe Only</span>
+      </div>
+      <div class="grid">
+        {% for fitem in focus_category_totals %}
+          <div class="card col-3 p-2 text-center" data-focus-category="{{ fitem.category }}">
+            <span class="badge badge-{{ fitem.category }}">{{ fitem.label }}</span>
+            <div class="stat-value mt-1">{{ fitem.display }}</div>
+          </div>
+        {% endfor %}
+      </div>
+    </section>
+  {% endif %}
+
   <section class="card col-12">
     <div class="card-header">
       <h2 class="card-title">Recent Activity Spans</h2>
@@ -56,8 +73,8 @@
 
   <section class="card col-12">
     <div class="card-header">
-      <h2 class="card-title">Pomodoro &amp; Timer Spans</h2>
-      <span class="badge badge-neutral">{{ timer_spans | length }} timers</span>
+      <h2 class="card-title">Desktop Countdown Spans</h2>
+      <span class="badge badge-neutral">{{ timer_spans | length }} desktop countdowns</span>
     </div>
     {% if timer_spans %}
       <div class="table-wrap">
@@ -87,7 +104,102 @@
         </table>
       </div>
     {% else %}
-      <div class="empty-state">No Pomodoro timer spans recorded yet.</div>
+      <div class="empty-state">No desktop countdown spans recorded yet.</div>
+    {% endif %}
+  </section>
+
+  <section class="card col-12">
+    <div class="card-header">
+      <h2 class="card-title">Recent Desktop Window Spans &amp; Calendar Correlations</h2>
+      <span class="badge badge-neutral">{{ window_spans | length }} spans</span>
+    </div>
+    {% if window_spans %}
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>App</th>
+              <th>Title</th>
+              <th>Category</th>
+              <th>Calendar Correlation</th>
+              <th>Duration</th>
+              <th>Started</th>
+              <th>Ended</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for w in window_spans %}
+              <tr>
+                <td class="mono"><strong>{{ w.app_class }}</strong></td>
+                <td class="text-truncate muted" style="max-width: 260px;" title="{{ w.window_title }}">{{ w.window_title }}</td>
+                <td>
+                  <span class="badge badge-{{ w.category }}">{{ w.category_label }}</span>
+                  {% if w.is_call_window %}
+                    <span class="badge badge-warn">Call</span>
+                  {% endif %}
+                </td>
+                <td class="mono">
+                  {% if w.calendar_event_id and w.calendar_event_id != "—" %}
+                    <span class="badge badge-purple">{{ w.calendar_event_id }}</span>
+                  {% else %}
+                    <span class="muted">—</span>
+                  {% endif %}
+                </td>
+                <td class="mono"><strong>{{ w.duration_display }}</strong></td>
+                <td class="mono muted">{{ w.started_display }}</td>
+                <td class="mono">
+                  {% if w.is_open %}
+                    <span class="badge badge-running">Active</span>
+                  {% else %}
+                    <span class="muted">{{ w.ended_display }}</span>
+                  {% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <div class="empty-state">No desktop window spans recorded yet.</div>
+    {% endif %}
+  </section>
+
+  <section class="card col-12">
+    <div class="card-header">
+      <h2 class="card-title">Recent Local AI Q&amp;A Interactions</h2>
+      <span class="badge badge-neutral">{{ llm_interactions | length }} interactions</span>
+    </div>
+    {% if llm_interactions %}
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Source</th>
+              <th>Question</th>
+              <th>Answer</th>
+              <th>Suggested Action</th>
+              <th>Model</th>
+              <th>Latency</th>
+              <th>Time</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for q in llm_interactions %}
+              <tr data-interaction-id="{{ q.id }}">
+                <td><span class="badge badge-info">{{ q.source }}</span></td>
+                <td class="font-bold">{{ q.question }}</td>
+                <td>{{ q.answer }}</td>
+                <td class="mono">{{ q.suggested_action }}</td>
+                <td class="mono muted">{{ q.model }}</td>
+                <td class="mono muted">{{ q.latency_display }}</td>
+                <td class="mono muted">{{ q.created_display }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <div class="empty-state">No AI assistant interactions recorded yet.</div>
     {% endif %}
   </section>
 
@@ -130,4 +242,3 @@
     {% endif %}
   </section>
 </div>
-

@@ -41,12 +41,13 @@ def test_default_config_yaml_parsing_and_privacy_defaults() -> None:
     assert settings.migrations_dir == PROJECT_ROOT / "migrations"
     assert settings.migrations_dir.is_dir()
 
-    # Milestone 1 default modules enabled in Session 3
-    assert settings.enabled_modules.inputs == ["manual_control"]
+    # Milestone 2 default modules enabled out of the box
+    assert settings.enabled_modules.inputs == ["manual_control", "hyprland_ipc"]
     assert settings.enabled_modules.policies == [
         "posture_policy",
         "pomodoro_policy",
         "meeting_policy",
+        "focus_policy",
     ]
     assert settings.enabled_modules.outputs == [
         "waybar_status",

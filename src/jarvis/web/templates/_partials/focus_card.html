@@ -1,0 +1,37 @@
+<div class="card-header">
+  <h2 class="card-title">Live Desktop Focus</h2>
+  <div class="btn-row">
+    <span class="badge badge-info">{{ focus_card.mode_label }}</span>
+    {% if focus_card.is_call_window %}
+      <span class="badge badge-warn">Call / Meeting Active</span>
+    {% endif %}
+    {% if focus_card.privacy_paused %}
+      <span class="badge badge-paused">PAUSED</span>
+    {% else %}
+      <span class="badge badge-{{ focus_card.category }}">{{ focus_card.category_label }}</span>
+    {% endif %}
+  </div>
+</div>
+
+<div class="stat-hero">
+  <div>
+    <span class="stat-value mono" data-testid="focus-app">{{ focus_card.app_class }}</span>
+    {% if focus_card.window_title and focus_card.window_title != "—" %}
+      <div class="muted small text-truncate" title="{{ focus_card.window_title }}">
+        {{ focus_card.window_title }}
+      </div>
+    {% endif %}
+  </div>
+</div>
+
+<div class="mt-2">
+  <span class="meta-label">Focus Category Breakdown (Today)</span>
+  <div class="grid mt-1">
+    {% for item in focus_card.category_breakdown %}
+      <div class="card col-3 p-2 text-center" data-category="{{ item.category }}">
+        <span class="badge badge-{{ item.category }}">{{ item.label }}</span>
+        <div class="mono font-bold mt-1">{{ item.display }}</div>
+      </div>
+    {% endfor %}
+  </div>
+</div>

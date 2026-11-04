@@ -127,6 +127,33 @@ class PrivacyDndRequest(BaseModel):
     enabled: bool | None = None
 
 
+class PrivacyTtsRequest(BaseModel):
+    """Optional payload for `POST /api/privacy/tts` (toggles TTS when omitted)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    allow_tts: bool | None = None
+    enabled: bool | None = None
+
+
+class PrivacyMicRequest(BaseModel):
+    """Optional payload for `POST /api/privacy/microphone`."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    microphone_mode: str | None = None
+    enabled: bool | None = None
+
+
+class SettingsLlmRequest(BaseModel):
+    """Payload for updating LLM runtime settings."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    text_model: str | None = None
+    keep_alive: str | None = None
+
+
 def _parse_json_or_form[ModelT: BaseModel](
     model_cls: type[ModelT],
     *,
@@ -191,6 +218,18 @@ _TimerStopDep = Annotated[
 _PrivacyDndDep = Annotated[
     PrivacyDndRequest,
     Depends(_parse_json_or_form(PrivacyDndRequest, allow_empty=True)),
+]
+_PrivacyTtsDep = Annotated[
+    PrivacyTtsRequest,
+    Depends(_parse_json_or_form(PrivacyTtsRequest, allow_empty=True)),
+]
+_PrivacyMicDep = Annotated[
+    PrivacyMicRequest,
+    Depends(_parse_json_or_form(PrivacyMicRequest, allow_empty=True)),
+]
+_SettingsLlmDep = Annotated[
+    SettingsLlmRequest,
+    Depends(_parse_json_or_form(SettingsLlmRequest, allow_empty=True)),
 ]
 _AskDep = Annotated[
     AskRequest,
@@ -411,18 +450,73 @@ async def get_state(request: Request) -> dict[str, Any]:
 
     current_window = await db.get_current_window_span()
     focus_state: FocusState = "unknown"
-    if current_window is not None:
+    window_category: str = "unknown"
+    app_class: str | None = None
+    window_title: str | None = None
+    is_call: bool = False
+
+    registry = _get_registry(request)
+    llm_enabled = registry.is_enabled("llm_ollama")
+
+    privacy_paused = bool(settings.privacy.global_pause or effective.privacy_paused)
+    dnd_mode = bool(settings.privacy.dnd_mode)
+
+    focus_mod = registry.get_module("focus_policy")
+    if (
+        focus_mod is not None
+        and hasattr(focus_mod, "get_focus_summary")
+        and not privacy_paused
+    ):
+        focus_summary = await focus_mod.get_focus_summary(now=now)
+        focus_state = focus_summary.get("focus_state", "unknown")
+        app_class = focus_summary.get("app_class")
+        window_title = focus_summary.get("window_title")
+        is_call = bool(focus_summary.get("is_call_window", False))
+        window_category = focus_state
+    elif current_window is not None and not privacy_paused:
         raw_cat = str(current_window.get("category", "unknown")).lower()
         focus_state = _FOCUS_CATEGORY_MAP.get(raw_cat, "unknown")
+        window_category = raw_cat
+        app_class = current_window.get("app_class")
+        window_title = current_window.get("window_title")
+        meta = current_window.get("metadata")
+        if isinstance(meta, dict) and meta.get("is_call_window") is not None:
+            is_call = bool(meta["is_call_window"])
+        else:
+            from jarvis.core.classification import is_call_window
+            is_call = is_call_window(app_class or "", window_title or "")
+
+    current_window_payload = (
+        {
+            "id": current_window.get("id") if current_window else None,
+            "app_class": app_class,
+            "window_title": window_title,
+            "title": window_title,
+            "category": window_category,
+            "focus": focus_state,
+            "is_call_window": is_call,
+        }
+        if (app_class or window_title or current_window) and not privacy_paused
+        else None
+    )
+
+    focus_context_payload = {
+        "focus_state": focus_state,
+        "focus": focus_state,
+        "app_class": app_class if not privacy_paused else None,
+        "window_title": window_title if not privacy_paused else None,
+        "category": window_category if not privacy_paused else "unknown",
+        "current_window_category": window_category if not privacy_paused else "unknown",
+        "is_call_window": is_call if not privacy_paused else False,
+        "call_window": is_call if not privacy_paused else False,
+        "mode": settings.privacy.hyprland_ipc_mode,
+    }
 
     pending_rows = await db.get_pending_recommendations()
     pending_recommendations = [
         Recommendation.model_validate(row).model_dump(mode="json")
         for row in pending_rows
     ]
-
-    privacy_paused = bool(settings.privacy.global_pause or effective.privacy_paused)
-    dnd_mode = bool(settings.privacy.dnd_mode)
 
     return {
         "activity": effective.activity,
@@ -437,10 +531,35 @@ async def get_state(request: Request) -> dict[str, Any]:
             else None
         ),
         "focus": focus_state,
+        "focus_context": focus_context_payload,
+        "current_window": current_window_payload,
+        "window_context": current_window_payload,
+        "current_window_category": window_category if not privacy_paused else "unknown",
+        "window_category": window_category if not privacy_paused else "unknown",
+        "call_window": is_call if not privacy_paused else False,
+        "is_call_window": is_call if not privacy_paused else False,
+        "llm_enabled": llm_enabled,
+        "llm": {
+            "enabled": llm_enabled,
+            "provider": settings.llm.provider,
+            "text_model": settings.llm.text_model,
+            "keep_alive": settings.llm.keep_alive,
+        },
+        "voice_status": settings.privacy.microphone_mode,
+        "voice": {
+            "status": settings.privacy.microphone_mode,
+            "microphone_mode": settings.privacy.microphone_mode,
+            "allow_tts": bool(settings.privacy.allow_tts),
+            "tts_enabled": registry.is_enabled("tts_piper"),
+        },
         "timer": timer_status,
         "active_timer": active_timer_model,
         "current_event": current_event,
         "next_event": next_event,
+        "calendar": {
+            "current_event": current_event,
+            "next_event": next_event,
+        },
         "privacy_paused": privacy_paused,
         "global_pause": privacy_paused,
         "dnd_mode": dnd_mode,
@@ -1044,6 +1163,128 @@ async def set_or_toggle_dnd(
     return result
 
 
+@router.post("/privacy/tts", response_model=None)
+async def set_or_toggle_tts(
+    request: Request,
+    payload: _PrivacyTtsDep,
+) -> HTMLResponse | dict[str, Any]:
+    """Set or toggle TTS audio permission (FR-25)."""
+    settings = _get_settings(request)
+    if payload.allow_tts is not None:
+        settings.privacy.allow_tts = bool(payload.allow_tts)
+    elif payload.enabled is not None:
+        settings.privacy.allow_tts = bool(payload.enabled)
+    else:
+        settings.privacy.allow_tts = not bool(settings.privacy.allow_tts)
+
+    result = await _persist_and_publish_privacy(
+        settings=settings,
+        db=_get_db(request),
+        bus=_get_bus(request),
+    )
+    if is_htmx_request(request):
+        context = await build_privacy_context(request)
+        return render_template(
+            request,
+            "_partials/privacy_card.html",
+            context,
+            headers={"HX-Trigger": "privacyChanged"},
+        )
+    return result
+
+
+@router.post("/privacy/microphone", response_model=None)
+async def set_or_toggle_microphone(
+    request: Request,
+    payload: _PrivacyMicDep,
+) -> HTMLResponse | dict[str, Any]:
+    """Set or toggle microphone privacy mode (push_to_talk | disabled)."""
+    settings = _get_settings(request)
+    if payload.microphone_mode is not None:
+        norm = payload.microphone_mode.strip().lower()
+        if norm in ("push_to_talk", "disabled"):
+            settings.privacy.microphone_mode = norm  # type: ignore[assignment]
+    elif payload.enabled is not None:
+        settings.privacy.microphone_mode = "push_to_talk" if payload.enabled else "disabled"
+    else:
+        settings.privacy.microphone_mode = (
+            "disabled" if settings.privacy.microphone_mode == "push_to_talk" else "push_to_talk"
+        )
+
+    result = await _persist_and_publish_privacy(
+        settings=settings,
+        db=_get_db(request),
+        bus=_get_bus(request),
+    )
+    if is_htmx_request(request):
+        context = await build_privacy_context(request)
+        return render_template(
+            request,
+            "_partials/privacy_card.html",
+            context,
+            headers={"HX-Trigger": "privacyChanged"},
+        )
+    return result
+
+
+@router.post("/settings/llm", response_model=None)
+async def update_llm_settings(
+    request: Request,
+    payload: _SettingsLlmDep,
+) -> HTMLResponse | dict[str, Any]:
+    """Update runtime text model or keep-alive duration for local LLM (FR-23)."""
+    settings = _get_settings(request)
+    db = _get_db(request)
+    registry = _get_registry(request)
+
+    if payload.text_model is not None and payload.text_model.strip():
+        settings.llm.text_model = payload.text_model.strip()
+        await db.set_setting("llm.text_model", settings.llm.text_model)
+    if payload.keep_alive is not None and payload.keep_alive.strip():
+        settings.llm.keep_alive = payload.keep_alive.strip()
+        await db.set_setting("llm.keep_alive", settings.llm.keep_alive)
+
+    await db.set_setting(
+        "llm",
+        {
+            "text_model": settings.llm.text_model,
+            "keep_alive": settings.llm.keep_alive,
+        },
+    )
+
+    llm_mod = registry.get_module("llm_ollama")
+    if llm_mod is not None:
+        from contextlib import suppress
+        with suppress(Exception):
+            await llm_mod.reload_config(settings.model_dump())
+
+    response_payload = {
+        "status": "ok",
+        "text_model": settings.llm.text_model,
+        "keep_alive": settings.llm.keep_alive,
+    }
+    if is_htmx_request(request):
+        msg = (
+            f"<div class='alert alert-success p-2'>Updated LLM model to "
+            f"<code>{settings.llm.text_model}</code> (keep-alive: "
+            f"<code>{settings.llm.keep_alive}</code>).</div>"
+        )
+        return HTMLResponse(
+            msg,
+            headers={"HX-Trigger": "settingsChanged"},
+        )
+    return response_payload
+
+
+@router.post("/settings", response_model=None)
+async def update_general_settings(
+    request: Request,
+    payload: _SettingsLlmDep,
+) -> HTMLResponse | dict[str, Any]:
+    """Alias for runtime settings update."""
+    return await update_llm_settings(request, payload)
+
+
 @router.post("/ask", response_model=None)
 async def ask_assistant(
     request: Request,
@@ -1177,11 +1418,16 @@ async def ask_assistant(
             else ""
         )
         conf_str = f"{result['confidence']:.2f}"
-        html = f"""<div class="assistant-response card p-3 mb-2">
-  <div class="answer">{result['answer']}</div>
-  {action_html}
-  <div class="meta text-muted small mt-2">Model: {result['model']} | Confidence: {conf_str}</div>
-</div>"""
+        latency_val = result.get("latency_ms")
+        latency_str = f" | Latency: {latency_val}ms" if latency_val is not None else ""
+        meta_str = f"Model: {result['model']}{latency_str} | Confidence: {conf_str}"
+        html = (
+            f"""<div class="assistant-response card p-3 mb-2">\n"""
+            f"""  <div class="answer">{result['answer']}</div>\n"""
+            f"""  {action_html}\n"""
+            f"""  <div class="meta text-muted small mt-2">{meta_str}</div>\n"""
+            f"""</div>"""
+        )
         return HTMLResponse(
             content=html,
             status_code=200,
@@ -1194,6 +1440,7 @@ async def ask_assistant(
         confidence=float(result["confidence"]),
         model=result["model"],
         interaction_id=result.get("interaction_id", 0),
+        latency_ms=result.get("latency_ms"),
     ).model_dump(mode="json")
 
 

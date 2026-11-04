@@ -521,3 +521,77 @@ tbody tr:hover {
   background: var(--bg-elevated);
 }
 
+.input-group {
+  display: flex;
+  gap: 0.5rem;
+  width: 100%;
+}
+
+.input-text {
+  flex: 1;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 0.5rem 0.75rem;
+  font-size: 0.9rem;
+}
+
+.input-text:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.ask-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.ask-options {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.voice-hint {
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--border);
+}
+
+.text-truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.assistant-response {
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+}
+
+.assistant-response .answer {
+  font-size: 0.95rem;
+  line-height: 1.5;
+}
+
+.link-primary {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.link-primary:hover {
+  color: var(--accent-hover);
+}
+

@@ -11,7 +11,7 @@ database:
 enabled_modules:
   inputs:
     - manual_control
-    # - hyprland_ipc
+    - hyprland_ipc
     # - google_calendar
     # - s24_webhook
     # - swalk_ble
@@ -21,7 +21,7 @@ enabled_modules:
     - posture_policy
     - pomodoro_policy
     - meeting_policy
-    # - focus_policy
+    - focus_policy
 
   outputs:
     - waybar_status
