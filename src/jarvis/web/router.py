@@ -89,3 +89,4 @@ async def modules_partial(request: Request) -> HTMLResponse:
     """Render HTMX partial for live module enable/disable controls and health status."""
     context = await build_modules_context(request)
     return render_template(request, "_partials/modules_card.html", context)
+

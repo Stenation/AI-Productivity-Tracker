@@ -645,3 +645,4 @@ async def build_settings_context(request: Request) -> dict[str, Any]:
             "waybar_signal": settings.waybar.waybar_signal,
         },
     }
+
