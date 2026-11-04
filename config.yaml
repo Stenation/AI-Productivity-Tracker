@@ -93,6 +93,42 @@ google_calendar:
   oauth_token_path: "~/.local/share/posture-platform/google-token.json"
   read_only: true
 
+calendar_classification:
+  explicit_mappings:
+    "Daily Standup": "meeting"
+    "1:1": "meeting"
+    "Sprint Planning": "planning"
+    "Inbox Zero": "email"
+  color_mappings:
+    "1": "reading"
+    "2": "deep_work"
+    "3": "planning"
+    "4": "break"
+    "5": "email"
+    "6": "admin"
+    "7": "meeting"
+    "8": "coding"
+    "9": "reading"
+    "10": "coding"
+    "11": "deep_work"
+  regex_rules:
+    - pattern: '(?i)\b(1:1|one-on-one|sync|standup|meeting|interview|retro|retrospective|huddle|call|debrief|presentation|demo)\b'
+      task_type: "meeting"
+    - pattern: '(?i)\b(break|lunch|dinner|breakfast|coffee|snack|stretch|rest|pause)\b'
+      task_type: "break"
+    - pattern: '(?i)\b(deep\s*work|focus\s*block|focus|study|studying|research|thesis|writing)\b'
+      task_type: "deep_work"
+    - pattern: '(?i)\b(code|coding|programming|refactor|refactoring|pr\s*review|pull\s*request|debug|debugging|dev|frontend|backend|bug|bugs|bugfix)\b'
+      task_type: "coding"
+    - pattern: '(?i)\b(email|emails|inbox\s*zero|inbox|triage\s*inbox|mail)\b'
+      task_type: "email"
+    - pattern: '(?i)\b(admin|administration|paperwork|expense|expenses|invoices?|timesheet|compliance|hr)\b'
+      task_type: "admin"
+    - pattern: '(?i)\b(planning|plan|sprint\s*plan|sprint\s*planning|roadmap|backlog|prioritization|weekly\s*review|okr)\b'
+      task_type: "planning"
+    - pattern: '(?i)\b(read|reading|book|audiobook|article|docs|documentation|paper|spec|specs)\b'
+      task_type: "reading"
+
 webcam:
   enabled: false
   device: "/dev/video0"

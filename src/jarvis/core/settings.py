@@ -179,6 +179,104 @@ class FocusSettings(BaseModel):
     )
 
 
+class CalendarClassificationSettings(BaseModel):
+    model_config = ConfigDict(validate_default=True, extra="ignore")
+
+    explicit_mappings: dict[str, str] = Field(default_factory=dict)
+    color_mappings: dict[str, str] = Field(
+        default_factory=lambda: {
+            "1": "reading",
+            "2": "deep_work",
+            "3": "planning",
+            "4": "break",
+            "5": "email",
+            "6": "admin",
+            "7": "meeting",
+            "8": "coding",
+            "9": "reading",
+            "10": "coding",
+            "11": "deep_work",
+        }
+    )
+    regex_rules: list[dict[str, str]] = Field(
+        default_factory=lambda: [
+            {
+                "pattern": (
+                    r"(?i)\b(1:1|one-on-one|sync|standup|meeting|interview"
+                    r"|retro|retrospective|huddle|call|debrief|presentation|demo)\b"
+                ),
+                "task_type": "meeting",
+            },
+            {
+                "pattern": (
+                    r"(?i)\b(break|lunch|dinner|breakfast|coffee|snack|stretch|rest|pause)\b"
+                ),
+                "task_type": "break",
+            },
+            {
+                "pattern": (
+                    r"(?i)\b(deep\s*work|focus\s*block|focus|study|studying"
+                    r"|research|thesis|writing)\b"
+                ),
+                "task_type": "deep_work",
+            },
+            {
+                "pattern": (
+                    r"(?i)\b(code|coding|programming|refactor|refactoring|pr\s*review"
+                    r"|pull\s*request|debug|debugging|dev|frontend|backend|bug|bugs|bugfix)\b"
+                ),
+                "task_type": "coding",
+            },
+            {
+                "pattern": r"(?i)\b(email|emails|inbox\s*zero|inbox|triage\s*inbox|mail)\b",
+                "task_type": "email",
+            },
+            {
+                "pattern": (
+                    r"(?i)\b(admin|administration|paperwork|expense|expenses|invoices?"
+                    r"|timesheet|compliance|hr)\b"
+                ),
+                "task_type": "admin",
+            },
+            {
+                "pattern": (
+                    r"(?i)\b(planning|plan|sprint\s*plan|sprint\s*planning|roadmap"
+                    r"|backlog|prioritization|weekly\s*review|okr)\b"
+                ),
+                "task_type": "planning",
+            },
+            {
+                "pattern": (
+                    r"(?i)\b(read|reading|book|audiobook|article|docs"
+                    r"|documentation|paper|spec|specs)\b"
+                ),
+                "task_type": "reading",
+            },
+        ]
+    )
+
+    @field_validator("regex_rules", mode="before")
+    @classmethod
+    def _validate_regex_rules(cls, value: Any) -> list[dict[str, str]]:
+        if isinstance(value, dict):
+            return [{"pattern": str(k), "task_type": str(v)} for k, v in value.items()]
+        if isinstance(value, list):
+            normalized: list[dict[str, str]] = []
+            for item in value:
+                if isinstance(item, dict):
+                    normalized.append({
+                        "pattern": str(item.get("pattern", "")),
+                        "task_type": str(item.get("task_type", "unknown")),
+                    })
+                elif isinstance(item, (list, tuple)) and len(item) == 2:
+                    normalized.append({
+                        "pattern": str(item[0]),
+                        "task_type": str(item[1]),
+                    })
+            return normalized
+        return value
+
+
 class GoogleCalendarSettings(BaseModel):
     model_config = ConfigDict(validate_default=True, extra="ignore")
 
@@ -187,6 +285,7 @@ class GoogleCalendarSettings(BaseModel):
     oauth_token_path: Path = Path("~/.local/share/posture-platform/google-token.json")
     credentials_path: Path | None = None
     read_only: bool = True
+    classification: CalendarClassificationSettings | None = None
 
     @field_validator("oauth_token_path", mode="before")
     @classmethod
@@ -289,6 +388,9 @@ class Settings(BaseSettings):
     google_calendar: GoogleCalendarSettings = Field(
         default_factory=GoogleCalendarSettings
     )
+    calendar_classification: CalendarClassificationSettings = Field(
+        default_factory=CalendarClassificationSettings
+    )
     webcam: WebcamSettings = Field(default_factory=WebcamSettings)
     swalk_ble: SwalkBleSettings = Field(default_factory=SwalkBleSettings)
     waybar: WaybarSettings = Field(default_factory=WaybarSettings)
@@ -312,6 +414,14 @@ class Settings(BaseSettings):
             self.database.migrations_dir = self.migrations_dir
         elif "migrations_dir" in self.database.model_fields_set:
             self.migrations_dir = self.database.migrations_dir
+
+        if self.google_calendar.classification is None:
+            self.google_calendar.classification = self.calendar_classification
+        elif (
+            not self.calendar_classification.explicit_mappings
+            and self.google_calendar.classification.explicit_mappings
+        ):
+            self.calendar_classification = self.google_calendar.classification
 
         if self.privacy.dashboard_bind_local_only and self.server.host not in {
             "127.0.0.1",
