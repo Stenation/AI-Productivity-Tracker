@@ -10,10 +10,10 @@ from __future__ import annotations
 import inspect
 import logging
 import re
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timedelta
 from re import Pattern
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -126,13 +126,16 @@ WALKING_OR_AUDIOBOOK_REGEX: Pattern[str] = re.compile(
 )
 
 
+ClassifierType = Literal["explicit", "color", "regex", "llm", "default"]
+
+
 class TaskClassificationResult(BaseModel):
     """Result of calendar event task classification."""
 
     model_config = ConfigDict(extra="ignore")
 
     task_type: TaskType = "unknown"
-    classifier: str = "default"
+    classifier: ClassifierType = "default"
     suitable_for_walking: bool | None = None
     recommended_pomodoro: str | None = None
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
@@ -149,6 +152,12 @@ class TaskClassificationResult(BaseModel):
 
     def __contains__(self, item: object) -> bool:
         return isinstance(item, str) and item in type(self).model_fields
+
+    def __await__(self):
+        async def _identity():
+            return self
+
+        return _identity().__await__()
 
 
 def is_walking_or_audiobook(text: str) -> bool:
@@ -276,29 +285,35 @@ def _match_explicit_mapping(
 
 
 def _extract_event_fields(
-    event: CalendarEvent | dict[str, Any] | str | None,
-    title: str | None,
-    description: str | None,
-    color_id: str | None,
+    title_or_event: CalendarEvent | dict[str, Any] | str | None = None,
+    description: str | None = None,
+    color_id: str | None = None,
+    *,
+    event: CalendarEvent | dict[str, Any] | str | None = None,
+    title: str | None = None,
 ) -> tuple[str, str | None, str | None, CalendarEvent | dict[str, Any] | None]:
+    actual_event = event if event is not None else (
+        title_or_event if not isinstance(title_or_event, str) else None
+    )
+
     ev_title = ""
     ev_desc = None
     ev_color = None
     event_obj: CalendarEvent | dict[str, Any] | None = None
 
-    if isinstance(event, CalendarEvent):
-        ev_title = event.title
-        ev_desc = event.description
-        ev_color = event.color_id
-        event_obj = event
-    elif isinstance(event, dict):
-        ev_title = str(event.get("title", ""))
-        ev_desc = event.get("description")
-        ev_color = event.get("color_id")
-        event_obj = event
-    elif isinstance(event, str):
-        ev_title = event
+    if isinstance(actual_event, CalendarEvent):
+        ev_title = actual_event.title
+        ev_desc = actual_event.description
+        ev_color = actual_event.color_id
+        event_obj = actual_event
+    elif isinstance(actual_event, dict):
+        ev_title = str(actual_event.get("title", ""))
+        ev_desc = actual_event.get("description")
+        ev_color = actual_event.get("color_id")
+        event_obj = actual_event
 
+    if isinstance(title_or_event, str):
+        ev_title = title_or_event
     if title is not None:
         ev_title = title
     if description is not None:
@@ -321,19 +336,19 @@ def _extract_event_fields(
 
 
 def classify_calendar_event_deterministic(
-    event: CalendarEvent | dict[str, Any] | str | None = None,
-    *,
-    title: str | None = None,
+    title: CalendarEvent | dict[str, Any] | str | None = None,
     description: str | None = None,
     color_id: str | None = None,
+    settings: Any | None = None,
+    *,
     explicit_mappings: Mapping[str, str] | None = None,
     color_mappings: Mapping[str, str] | None = None,
     regex_rules: Sequence[tuple[str | Pattern[str], str]]
     | Sequence[dict[str, str]]
     | Mapping[str, str]
     | None = None,
-    settings: Any | None = None,
     pomodoro_settings: Any | None = None,
+    event: CalendarEvent | dict[str, Any] | str | None = None,
 ) -> TaskClassificationResult:
     """Deterministically classify a calendar event using precedence steps 1, 2, 3, and 5.
 
@@ -344,7 +359,10 @@ def classify_calendar_event_deterministic(
     5. 'unknown' default.
     """
     clean_title, clean_desc, clean_color, _ = _extract_event_fields(
-        event, title, description, color_id
+        title_or_event=title,
+        description=description,
+        color_id=color_id,
+        event=event,
     )
 
     # Resolve settings if provided
@@ -567,20 +585,21 @@ def _normalize_llm_result(
 
 
 async def classify_calendar_event(
-    event: CalendarEvent | dict[str, Any] | str | None = None,
-    *,
-    title: str | None = None,
+    title: CalendarEvent | dict[str, Any] | str | None = None,
     description: str | None = None,
     color_id: str | None = None,
+    settings: Any | None = None,
+    *,
+    llm_classifier: Callable[..., Any] | None = None,
+    llm_fallback: Callable[..., Any] | None = None,
     explicit_mappings: Mapping[str, str] | None = None,
     color_mappings: Mapping[str, str] | None = None,
     regex_rules: Sequence[tuple[str | Pattern[str], str]]
     | Sequence[dict[str, str]]
     | Mapping[str, str]
     | None = None,
-    llm_fallback: Callable[..., Awaitable[Any]] | None = None,
-    settings: Any | None = None,
     pomodoro_settings: Any | None = None,
+    event: CalendarEvent | dict[str, Any] | str | None = None,
 ) -> TaskClassificationResult:
     """Classify a calendar event with strict precedence:
 
@@ -590,29 +609,34 @@ async def classify_calendar_event(
     4. Optional async LLM fallback callable.
     5. 'unknown' default.
     """
+    effective_llm = llm_classifier if llm_classifier is not None else llm_fallback
+
     result = classify_calendar_event_deterministic(
-        event=event,
         title=title,
         description=description,
         color_id=color_id,
+        settings=settings,
         explicit_mappings=explicit_mappings,
         color_mappings=color_mappings,
         regex_rules=regex_rules,
-        settings=settings,
         pomodoro_settings=pomodoro_settings,
+        event=event,
     )
 
     if result.task_type != "unknown":
         return result
 
-    # Step 4: Optional async LLM fallback callable (only runs if deterministic result is unknown)
-    if llm_fallback is not None:
+    # Step 4: Optional async LLM fallback hook (only runs if deterministic result is unknown)
+    if effective_llm is not None:
         raw_title, raw_desc, raw_color, event_obj = _extract_event_fields(
-            event, title, description, color_id
+            title_or_event=title,
+            description=description,
+            color_id=color_id,
+            event=event,
         )
         try:
             llm_res = await _call_llm_fallback(
-                llm_fallback,
+                effective_llm,
                 event=event_obj,
                 title=raw_title,
                 description=raw_desc,
@@ -632,6 +656,10 @@ async def classify_calendar_event(
 
     # Step 5: unknown default
     return result
+
+
+classify_calendar_event_sync = classify_calendar_event_deterministic
+classify_calendar_event.sync = classify_calendar_event_sync  # type: ignore[attr-defined]
 
 
 def apply_classification_to_event(
@@ -962,21 +990,32 @@ def classify_window(
     ).strip().lower() or None
 
     # Resolve settings configuration
-    focus_cfg = None
+    focus_cfgs: list[Any] = []
     if settings is not None:
+        if hasattr(settings, "classification"):
+            focus_cfgs.append(settings.classification)
         if hasattr(settings, "focus"):
-            focus_cfg = settings.focus
-        else:
-            focus_cfg = settings
+            focus_cfgs.append(settings.focus)
+        if not focus_cfgs:
+            focus_cfgs.append(settings)
 
     def _get_cfg(field_name: str, default: Any) -> Any:
-        if focus_cfg is not None:
-            if hasattr(focus_cfg, field_name):
-                val = getattr(focus_cfg, field_name)
+        for cfg in focus_cfgs:
+            if hasattr(cfg, field_name):
+                val = getattr(cfg, field_name)
+                if val is not None and val != [] and val != {}:
+                    return val
+            elif isinstance(cfg, Mapping) and field_name in cfg:
+                val = cfg[field_name]
+                if val is not None and val != [] and val != {}:
+                    return val
+        for cfg in focus_cfgs:
+            if hasattr(cfg, field_name):
+                val = getattr(cfg, field_name)
                 if val is not None:
                     return val
-            elif isinstance(focus_cfg, Mapping) and field_name in focus_cfg:
-                val = focus_cfg[field_name]
+            elif isinstance(cfg, Mapping) and field_name in cfg:
+                val = cfg[field_name]
                 if val is not None:
                     return val
         return default

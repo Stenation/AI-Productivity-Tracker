@@ -304,6 +304,46 @@ class CalendarClassificationSettings(BaseModel):
         return value
 
 
+class ClassificationSettings(CalendarClassificationSettings):
+    """Configuration settings for explicit event, color, regex, and window classification."""
+
+    model_config = ConfigDict(validate_default=True, extra="ignore")
+
+    work_app_classes: list[str] = Field(
+        default_factory=lambda: ["code", "Alacritty", "kitty", "obsidian", "Zotero"]
+    )
+    distraction_app_classes: list[str] = Field(default_factory=list)
+    neutral_app_classes: list[str] = Field(default_factory=list)
+    distraction_title_patterns: list[str] = Field(
+        default_factory=lambda: ["YouTube", "Reddit", "Twitch", "Twitter", "X"]
+    )
+    work_title_patterns: list[str] = Field(default_factory=list)
+    neutral_title_patterns: list[str] = Field(default_factory=list)
+    call_app_classes: list[str] = Field(
+        default_factory=lambda: [
+            "zoom",
+            "teams",
+            "microsoft teams",
+            "webex",
+        ]
+    )
+    call_title_patterns: list[str] = Field(
+        default_factory=lambda: [
+            "Zoom Meeting",
+            "Zoom Cloud Meetings",
+            "Google Meet",
+            "Meet -",
+            "meet.google.com",
+            "Microsoft Teams",
+            "Teams Meeting",
+            "Discord Voice",
+            "Voice Connected",
+            "Huddle",
+        ]
+    )
+    app_class_rules: dict[str, str] = Field(default_factory=dict)
+
+
 class GoogleCalendarSettings(BaseModel):
     model_config = ConfigDict(validate_default=True, extra="ignore")
 
@@ -418,6 +458,9 @@ class Settings(BaseSettings):
     calendar_classification: CalendarClassificationSettings = Field(
         default_factory=CalendarClassificationSettings
     )
+    classification: ClassificationSettings = Field(
+        default_factory=ClassificationSettings
+    )
     webcam: WebcamSettings = Field(default_factory=WebcamSettings)
     swalk_ble: SwalkBleSettings = Field(default_factory=SwalkBleSettings)
     waybar: WaybarSettings = Field(default_factory=WaybarSettings)
@@ -442,6 +485,50 @@ class Settings(BaseSettings):
         elif "migrations_dir" in self.database.model_fields_set:
             self.migrations_dir = self.database.migrations_dir
 
+        if "focus" in self.model_fields_set and "classification" not in self.model_fields_set:
+            for field in (
+                "work_app_classes",
+                "distraction_app_classes",
+                "neutral_app_classes",
+                "distraction_title_patterns",
+                "work_title_patterns",
+                "neutral_title_patterns",
+                "call_app_classes",
+                "call_title_patterns",
+                "app_class_rules",
+            ):
+                if field in self.focus.model_fields_set:
+                    setattr(self.classification, field, getattr(self.focus, field))
+        elif "classification" in self.model_fields_set and "focus" not in self.model_fields_set:
+            for field in (
+                "work_app_classes",
+                "distraction_app_classes",
+                "neutral_app_classes",
+                "distraction_title_patterns",
+                "work_title_patterns",
+                "neutral_title_patterns",
+                "call_app_classes",
+                "call_title_patterns",
+                "app_class_rules",
+            ):
+                if field in self.classification.model_fields_set:
+                    setattr(self.focus, field, getattr(self.classification, field))
+
+        if (
+            not self.classification.explicit_mappings
+            and self.calendar_classification.explicit_mappings
+        ):
+            self.classification.explicit_mappings = (
+                self.calendar_classification.explicit_mappings
+            )
+        elif (
+            self.classification.explicit_mappings
+            and not self.calendar_classification.explicit_mappings
+        ):
+            self.calendar_classification.explicit_mappings = (
+                self.classification.explicit_mappings
+            )
+
         if self.google_calendar.classification is None:
             self.google_calendar.classification = self.calendar_classification
         elif (
@@ -449,6 +536,9 @@ class Settings(BaseSettings):
             and self.google_calendar.classification.explicit_mappings
         ):
             self.calendar_classification = self.google_calendar.classification
+            self.classification.explicit_mappings = (
+                self.google_calendar.classification.explicit_mappings
+            )
 
         if self.privacy.dashboard_bind_local_only and self.server.host not in {
             "127.0.0.1",

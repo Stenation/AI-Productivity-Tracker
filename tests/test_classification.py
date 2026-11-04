@@ -16,6 +16,7 @@ from jarvis.core.classification import (
     apply_classification_to_event,
     classify_calendar_event,
     classify_calendar_event_deterministic,
+    classify_calendar_event_sync,
     classify_window,
     get_recommended_pomodoro,
     is_call_window,
@@ -25,6 +26,7 @@ from jarvis.core.classification import (
 from jarvis.core.schema import CalendarEvent, TaskType
 from jarvis.core.settings import (
     CalendarClassificationSettings,
+    ClassificationSettings,
     FocusSettings,
     PomodoroSettings,
     Settings,
@@ -1103,3 +1105,164 @@ def test_window_classification_result_dict_access() -> None:
 
     with pytest.raises(KeyError):
         _ = res["non_existent_key"]
+
+
+# 15. Comprehensive 5-stage cascade and ClassificationSettings tests
+
+
+@pytest.mark.asyncio
+async def test_strict_five_tier_precedence_cascade() -> None:
+    """Test full strict precedence cascade: explicit > color > regex > llm > unknown."""
+    # Stage 1: Explicit mapping present -> wins over color, regex, and LLM
+    mock_llm = AsyncMock(return_value="deep_work")
+    # color 1 -> reading, regex -> coding
+    event_1 = _create_event("Refactor auth backend", color_id="1")
+    res_explicit = await classify_calendar_event(
+        event_1,
+        explicit_mappings={"Refactor auth backend": "admin"},
+        llm_classifier=mock_llm,
+    )
+    assert res_explicit.task_type == "admin"
+    assert res_explicit.classifier == "explicit"
+    assert res_explicit.confidence == 1.0
+    mock_llm.assert_not_called()
+
+    # Stage 2: No explicit mapping -> Color ID wins over regex and LLM
+    res_color = await classify_calendar_event(
+        event_1,
+        llm_classifier=mock_llm,
+    )
+    assert res_color.task_type == "reading"
+    assert res_color.classifier == "color"
+    assert res_color.confidence == 0.95
+    mock_llm.assert_not_called()
+
+    # Stage 3: No explicit, unmapped color -> Regex wins over LLM
+    event_2 = _create_event("Refactor auth backend")
+    res_regex = await classify_calendar_event(
+        event_2,
+        llm_classifier=mock_llm,
+    )
+    assert res_regex.task_type == "coding"
+    assert res_regex.classifier == "regex"
+    assert res_regex.confidence == 0.85
+    mock_llm.assert_not_called()
+
+    # Stage 4: Ambiguous title (no regex match) -> LLM fallback wins over unknown
+    event_3 = _create_event("Ambiguous Quantum Optimization")
+    res_llm = await classify_calendar_event(
+        event_3,
+        llm_classifier=mock_llm,
+    )
+    assert res_llm.task_type == "deep_work"
+    assert res_llm.classifier == "llm"
+    assert res_llm.confidence == 0.8
+    mock_llm.assert_awaited_once()
+
+    # Stage 5: No LLM (or LLM returns None) -> default unknown
+    mock_none_llm = AsyncMock(return_value=None)
+    res_unknown = await classify_calendar_event(
+        event_3,
+        llm_classifier=mock_none_llm,
+    )
+    assert res_unknown.task_type == "unknown"
+    assert res_unknown.classifier == "default"
+    assert res_unknown.confidence == 0.0
+    assert res_unknown.suitable_for_walking is None
+    assert res_unknown.recommended_pomodoro is None
+
+
+@pytest.mark.asyncio
+async def test_classify_calendar_event_positional_arguments() -> None:
+    """Verify classify_calendar_event accepts title, desc, color_id, settings positionally."""
+    settings = Settings(
+        classification=ClassificationSettings(
+            explicit_mappings={"Special Session": "planning"}
+        )
+    )
+    mock_llm = AsyncMock(return_value="coding")
+
+    # Positional: title, description, color_id, settings
+    res = await classify_calendar_event(
+        "Special Session",
+        "Quarterly roadmap review",
+        "1",
+        settings,
+        llm_classifier=mock_llm,
+    )
+    assert res.task_type == "planning"
+    assert res.classifier == "explicit"
+    assert res.suitable_for_walking is True
+    assert res.recommended_pomodoro == "25_5"
+    mock_llm.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_llm_classifier_success_with_task_classification_result() -> None:
+    """Verify llm_classifier returning TaskClassificationResult object directly."""
+    expected_result = TaskClassificationResult(
+        task_type="coding",
+        classifier="llm",
+        suitable_for_walking=False,
+        recommended_pomodoro="50_10",
+        confidence=0.91,
+    )
+    mock_llm = AsyncMock(return_value=expected_result)
+
+    res = await classify_calendar_event(
+        "Ambiguous Tech Task",
+        llm_classifier=mock_llm,
+    )
+    assert res.task_type == "coding"
+    assert res.classifier == "llm"
+    assert res.confidence == 0.91
+    assert res.suitable_for_walking is False
+    assert res.recommended_pomodoro == "50_10"
+    mock_llm.assert_awaited_once()
+
+
+def test_classify_calendar_event_sync_api() -> None:
+    """Verify synchronous classification API functions and aliases."""
+    res1 = classify_calendar_event_deterministic("Refactor auth backend")
+    assert res1.task_type == "coding"
+    assert res1.classifier == "regex"
+
+    res2 = classify_calendar_event_sync("Refactor auth backend")
+    assert res2.task_type == "coding"
+    assert res2.classifier == "regex"
+
+    res3 = classify_calendar_event.sync("Refactor auth backend")
+    assert res3.task_type == "coding"
+    assert res3.classifier == "regex"
+
+
+def test_classification_settings_defaults_and_custom_overrides() -> None:
+    """Verify ClassificationSettings holds both calendar and window overrides."""
+    default_settings = ClassificationSettings()
+    assert "1" in default_settings.color_mappings
+    assert any(c == "code" for c in default_settings.work_app_classes)
+    assert any("YouTube" in p for p in default_settings.distraction_title_patterns)
+    assert any("zoom" in c for c in default_settings.call_app_classes)
+
+    custom_settings = Settings(
+        classification=ClassificationSettings(
+            explicit_mappings={"All Hands": "meeting"},
+            app_class_rules={"special_term": "focused"},
+            work_app_classes=["custom_editor"],
+        )
+    )
+    # Window classification uses ClassificationSettings
+    res_win = classify_window("special_term", "Terminal", settings=custom_settings)
+    assert res_win.category == "focused"
+    assert res_win.classifier == "app_class"
+
+    res_win2 = classify_window("custom_editor", "doc.txt", settings=custom_settings)
+    assert res_win2.category == "focused"
+    assert res_win2.classifier == "app_class"
+
+    # Calendar classification uses ClassificationSettings
+    res_cal = classify_calendar_event_deterministic(
+        "All Hands", settings=custom_settings
+    )
+    assert res_cal.task_type == "meeting"
+    assert res_cal.classifier == "explicit"
