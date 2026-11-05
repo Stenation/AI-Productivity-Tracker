@@ -612,6 +612,25 @@ class Database:
                     rows = await cursor.fetchall()
             return [d for r in rows if (d := _row_to_dict(r)) is not None]
 
+    async def get_recent_recommendations_for_dedupe(
+        self,
+        dedupe_key: str,
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        """Return recent recommendations for dedupe_key ordered by created_at DESC."""
+        async with self._lock:
+            async with self.connection.execute(
+                """
+                SELECT * FROM recommendations
+                WHERE dedupe_key = ?
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+                """,
+                (dedupe_key, int(limit)),
+            ) as cursor:
+                rows = await cursor.fetchall()
+            return [d for r in rows if (d := _row_to_dict(r)) is not None]
+
     async def find_recent_recommendation(
         self,
         dedupe_key: str,

@@ -649,3 +649,49 @@ async def test_posture_nudges_suppressed_by_ad_hoc_call_and_input_idle(
         assert rec2["dedupe_key"] == SITTING_DEDUPE_KEY
     finally:
         await policy.stop()
+
+
+async def test_posture_stepped_dismissal_backoff(
+    db: Database,
+    test_settings: Settings,
+) -> None:
+    """Verify posture alerts apply stepped cooldown backoff on repeated dismissals."""
+    t0 = datetime(2026, 11, 4, 14, 0, 0).astimezone()
+    now = t0
+    bus = EventBus()
+    cfg = _policy_config(test_settings, max_sitting_minutes=50, recommendation_cooldown_minutes=30)
+    policy = PosturePolicyModule(bus=bus, db=db, config=cfg, clock=lambda: now)
+    await policy.start()
+    try:
+        await db.open_activity_span("sitting", "manual_control", started_at=t0)
+        now = t0 + timedelta(minutes=55)
+
+        # 1. First alert fires
+        rec1 = await policy.evaluate(now=now)
+        assert rec1 is not None
+
+        # 1st dismissal: 30m base cooldown
+        await db.resolve_recommendation(rec1["id"], "dismissed", resolved_at=now)
+        now = now + timedelta(minutes=25)
+        assert await policy.evaluate(now=now) is None  # within 30m
+        now = now + timedelta(minutes=6)  # at 31m: fires again!
+        rec2 = await policy.evaluate(now=now)
+        assert rec2 is not None
+
+        # 2nd consecutive dismissal: 2x cooldown = 60m
+        await db.resolve_recommendation(rec2["id"], "dismissed", resolved_at=now)
+        now = now + timedelta(minutes=45)
+        assert await policy.evaluate(now=now) is None  # within 60m
+        now = now + timedelta(minutes=20)  # at 65m: fires again!
+        rec3 = await policy.evaluate(now=now)
+        assert rec3 is not None
+
+        # 3rd consecutive dismissal: 4x cooldown = 120m cap
+        await db.resolve_recommendation(rec3["id"], "dismissed", resolved_at=now)
+        now = now + timedelta(minutes=90)
+        assert await policy.evaluate(now=now) is None  # within 120m
+        now = now + timedelta(minutes=35)  # at 125m: fires again!
+        rec4 = await policy.evaluate(now=now)
+        assert rec4 is not None
+    finally:
+        await policy.stop()

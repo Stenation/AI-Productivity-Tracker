@@ -469,9 +469,11 @@ class PosturePolicyModule(BaseModule):
         if any(row.get("dedupe_key") == dedupe_key for row in pending_rows):
             return True
 
-        latest = await self.db.find_recent_recommendation(dedupe_key)
-        if latest is None:
+        recent = await self.db.get_recent_recommendations_for_dedupe(dedupe_key, limit=5)
+        if not recent:
             return False
+
+        latest = recent[0]
         if latest.get("status") == "pending":
             return True
 
@@ -493,18 +495,57 @@ class PosturePolicyModule(BaseModule):
         ):
             return False
 
-        effective_cooldown = self.cooldown_minutes()
-        if latest.get("status") == "snoozed":
-            metadata = latest.get("resolution_metadata")
-            if isinstance(metadata, dict) and metadata.get("snooze_minutes") is not None:
-                effective_cooldown = float(metadata["snooze_minutes"])
+        metadata = latest.get("resolution_metadata")
+        if isinstance(metadata, dict):
+            cooldown_until_raw = metadata.get("cooldown_until") or metadata.get("snoozed_until")
+            if cooldown_until_raw:
+                cooldown_until = _parse_dt(cooldown_until_raw)
+                if cooldown_until is not None and now < cooldown_until:
+                    return True
 
-        if effective_cooldown <= 0:
-            return False
+        base_cooldown = self.cooldown_minutes()
+        latest_status = latest.get("status")
 
-        since = now - timedelta(minutes=effective_cooldown) + timedelta(microseconds=1)
-        recent = await self.db.find_recent_recommendation(dedupe_key, since=since)
-        return recent is not None
+        if latest_status == "snoozed":
+            snooze_mins = (
+                float(metadata["snooze_minutes"])
+                if isinstance(metadata, dict) and metadata.get("snooze_minutes") is not None
+                else base_cooldown
+            )
+            if snooze_mins <= 0:
+                return False
+            resolved_at = resolved_dt or created_dt or now
+            return now < (resolved_at + timedelta(minutes=snooze_mins))
+
+        if latest_status == "dismissed":
+            consecutive_dismissals = 0
+            for r in recent:
+                if r.get("status") == "dismissed":
+                    consecutive_dismissals += 1
+                elif r.get("status") == "accepted":
+                    break
+                else:
+                    break
+
+            if consecutive_dismissals >= 3:
+                effective_mins = min(120.0, base_cooldown * 4)
+            elif consecutive_dismissals == 2:
+                effective_mins = base_cooldown * 2
+            else:
+                effective_mins = base_cooldown
+
+            if effective_mins <= 0:
+                return False
+            resolved_at = resolved_dt or created_dt or now
+            return now < (resolved_at + timedelta(minutes=effective_mins))
+
+        if latest_status == "accepted":
+            if base_cooldown <= 0:
+                return False
+            resolved_at = resolved_dt or created_dt or now
+            return now < (resolved_at + timedelta(minutes=base_cooldown))
+
+        return False
 
     async def _create_and_publish(
         self,
