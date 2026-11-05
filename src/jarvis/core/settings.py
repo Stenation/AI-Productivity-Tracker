@@ -467,7 +467,7 @@ class TtsSettings(BaseModel):
         "~/.local/share/posture-platform/voices/en_US-lessac-medium.onnx"
     )
     german_voice_model_path: Path | None = Path(
-        "~/.local/share/posture-platform/voices/de_DE-thorsten-medium.onnx"
+        "~/.local/share/posture-platform/voices/de_DE-lila_hokuspokus-high.onnx"
     )
     config_path: Path | None = None
     piper_binary: str | None = None

@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_VOICE_MODEL_PATH = Path("~/.local/share/posture-platform/voices/en_US-lessac-medium.onnx")
 DEFAULT_GERMAN_VOICE_MODEL_PATH = Path(
-    "~/.local/share/posture-platform/voices/de_DE-thorsten-medium.onnx"
+    "~/.local/share/posture-platform/voices/de_DE-lila_hokuspokus-high.onnx"
 )
 DEFAULT_PLAYER_BINARY = "pw-play"
 DEFAULT_TEMP_DIR = Path("/dev/shm")
