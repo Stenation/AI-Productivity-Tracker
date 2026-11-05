@@ -169,6 +169,7 @@ class GoogleCalendarModule(BaseModule):
         self._last_error: str | None = None
         self._last_event_at: datetime | None = None
         self._last_sync_at: datetime | None = None
+        self._synced_until: datetime | None = None
         self._last_context_signature: tuple[Any, ...] = (None, None, None, None)
 
         self._sync_task: asyncio.Task[None] | None = None
@@ -190,6 +191,19 @@ class GoogleCalendarModule(BaseModule):
         if raw is not None:
             return max(1.0, float(raw) * 60.0)
         return DEFAULT_SYNC_INTERVAL_MINUTES * 60.0
+
+    @property
+    def sync_days_ahead(self) -> int:
+        """Return configured days ahead to synchronize (default: 14 days)."""
+        raw = self.config.get("sync_days_ahead")
+        if raw is not None:
+            try:
+                val = int(raw)
+                if val >= 1:
+                    return val
+            except (ValueError, TypeError):
+                pass
+        return 14
 
     @property
     def boundary_check_interval_seconds(self) -> float:
@@ -296,11 +310,19 @@ class GoogleCalendarModule(BaseModule):
             "last_sync_at": (
                 self._last_sync_at.isoformat() if self._last_sync_at is not None else None
             ),
+            "synced_until": (
+                self._synced_until.isoformat() if self._synced_until is not None else None
+            ),
             "last_error": self._last_error,
         }
 
-    async def sync_calendar(self, now: datetime | None = None) -> list[dict[str, Any]]:
-        """Synchronize calendar events within [now - 1h, now + 24h]."""
+    async def sync_calendar(
+        self,
+        now: datetime | None = None,
+        time_min: datetime | None = None,
+        time_max: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        """Synchronize calendar events within [now - 1h, now + sync_days_ahead] or custom window."""
         ref_now = ensure_aware(now) if now is not None else self._now()
 
         if self._privacy_paused:
@@ -311,8 +333,15 @@ class GoogleCalendarModule(BaseModule):
         end_of_today = datetime.combine(
             ref_now.date() + timedelta(days=1), time.min, tzinfo=ref_now.tzinfo
         )
-        time_min = min(ref_now - timedelta(hours=1), start_of_today)
-        time_max = max(ref_now + timedelta(hours=24), end_of_today)
+        if time_min is None:
+            effective_time_min = min(ref_now - timedelta(hours=1), start_of_today)
+        else:
+            effective_time_min = ensure_aware(time_min)
+
+        if time_max is None:
+            effective_time_max = max(ref_now + timedelta(days=self.sync_days_ahead), end_of_today)
+        else:
+            effective_time_max = ensure_aware(time_max)
 
         all_items: list[dict[str, Any]] = []
         cal_tz_name: str | None = None
@@ -321,8 +350,8 @@ class GoogleCalendarModule(BaseModule):
         while True:
             params: dict[str, Any] = {
                 "calendarId": self.calendar_id,
-                "timeMin": time_min.isoformat(),
-                "timeMax": time_max.isoformat(),
+                "timeMin": effective_time_min.isoformat(),
+                "timeMax": effective_time_max.isoformat(),
                 "singleEvents": True,
                 "orderBy": "startTime",
             }
@@ -429,13 +458,16 @@ class GoogleCalendarModule(BaseModule):
         # Prune stale or cancelled events that were cached in this window
         if self._db_connected():
             await self.db.prune_stale_calendar_events(
-                time_min=time_min,
-                time_max=time_max,
+                time_min=effective_time_min,
+                time_max=effective_time_max,
                 keep_event_ids=synced_ids,
                 calendar_id=self.calendar_id,
             )
 
         self._last_sync_at = ref_now
+        self._synced_until = effective_time_max
+        if self._db_connected():
+            await self.db.set_setting("calendar.synced_until", effective_time_max.isoformat())
         await self._record_success(event_time=ref_now)
         await self._check_and_emit_context_changed(ref_now)
         return persisted_events

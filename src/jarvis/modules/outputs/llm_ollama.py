@@ -136,6 +136,7 @@ class LlmOllamaModule(BaseModule):
                 timer_manager=timer_manager,
                 settings=settings,
                 registry=registry,
+                question=question,
             )
 
         # 2. Invoke local LLM with error isolation

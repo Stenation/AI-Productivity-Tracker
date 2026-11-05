@@ -267,6 +267,12 @@ async def test_sync_timed_and_allday_events_and_classification(
     assert other_tz["task_type"] == "meeting"
     assert "19:00:00" in other_tz["start_time"] or "17:00:00" in other_tz["start_time"]
 
+    # Verify sync_days_ahead and synced_until tracking
+    assert module.sync_days_ahead == 14
+    health = await module.health()
+    assert health["synced_until"] is not None
+    assert await calendar_db.get_setting("calendar.synced_until") == health["synced_until"]
+
 
 async def test_pagination_handling(
     bus: EventBus,

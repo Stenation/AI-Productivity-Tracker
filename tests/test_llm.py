@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from datetime import time as dt_time
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
@@ -23,6 +24,7 @@ from jarvis.core.llm import (
     build_assistant_context,
     classify_event_with_llm,
     clean_think_tags,
+    parse_calendar_query_range,
     validate_llm_response,
 )
 from jarvis.core.schema import CalendarEvent, PlatformEvent
@@ -765,6 +767,43 @@ async def test_optional_calendar_classification_fallback() -> None:
     await fake_client.close()
 
 
+async def test_classify_window_with_llm_integration() -> None:
+    """Verify classify_window_with_llm correctly parses Ollama responses and respects settings."""
+    from jarvis.core.llm import classify_window_with_llm
+
+    fake_transport = make_fake_ollama_transport(
+        response_content={"category": "focused", "confidence": 0.92, "reason": "Academic literature search"}
+    )
+    fake_client = OllamaClient(transport=fake_transport)
+
+    # 1. Disabled in settings -> returns None
+    settings_off = Settings()
+    res_off = await classify_window_with_llm(
+        app_class="firefox",
+        window_title="Some Academic Blog",
+        client=fake_client,
+        settings=settings_off,
+    )
+    assert res_off is None
+
+    # 2. Enabled in settings -> returns classified result
+    settings_on = Settings()
+    settings_on.focus.enable_llm_fallback = True
+    res_on = await classify_window_with_llm(
+        app_class="firefox",
+        window_title="Some Academic Blog",
+        client=fake_client,
+        settings=settings_on,
+    )
+    assert res_on is not None
+    assert res_on["category"] == "focused"
+    assert res_on["confidence"] == 0.92
+    assert res_on["reason"] == "Academic literature search"
+
+    await fake_client.close()
+
+
+
 # ---------------------------------------------------------------------------
 # 14. LLM Safety Boundary: Inability to Mutate State
 # ---------------------------------------------------------------------------
@@ -986,3 +1025,276 @@ async def test_calendar_to_chat_empty_and_populated_events(
     assert cal_pop["events_today"][0]["time_window"] == "08:30 – 09:30"
     assert cal_pop["events_today"][1]["time_window"] == "12:00 – 13:00"
     assert cal_pop["events_today"][2]["time_window"] == "19:00 – 20:30"
+
+
+# ---------------------------------------------------------------------------
+# 15. Calendar Multi-Day Range, Doctor's Appointment & Completeness Tests
+# ---------------------------------------------------------------------------
+
+
+def test_parse_calendar_query_range() -> None:
+    """Verify natural-language calendar query date range extraction and full final day inclusion."""
+    berlin_tz = ZoneInfo("Europe/Berlin")
+    ref_now = datetime(2026, 11, 5, 12, 40, 0, tzinfo=berlin_tz)
+
+    # 1. German multi-day date: "Was ist bis zum 8.11.2026 der wichtigste Termin?"
+    q1 = "Was ist bis zum 8.11.2026 der wichtigste Termin?"
+    s1, e1, exp1, desc1 = parse_calendar_query_range(q1, ref_now)
+    assert exp1 is True
+    assert s1 == datetime(2026, 11, 5, 0, 0, 0, tzinfo=berlin_tz)
+    # Full final day (Nov 8) in Europe/Berlin must be included: end_dt must be 2026-11-09T00:00:00+01:00
+    assert e1 == datetime(2026, 11, 9, 0, 0, 0, tzinfo=berlin_tz)
+    assert "2026-11-05 to 2026-11-08" in desc1
+
+    # 2. Typos & 2-digit year: "was denkst du ist der wichtigste dtermin diese woche bis zum 8.11.26?"
+    q2 = "was denkst du ist der wichtigste dtermin diese woche bis zum 8.11.26? also den den man nicht verpassen sollte"
+    s2, e2, exp2, desc2 = parse_calendar_query_range(q2, ref_now)
+    assert exp2 is True
+    assert s2 == datetime(2026, 11, 5, 0, 0, 0, tzinfo=berlin_tz)
+    assert e2 == datetime(2026, 11, 9, 0, 0, 0, tzinfo=berlin_tz)
+
+    # 3. Tomorrow: "Welche Termine habe ich morgen?"
+    q3 = "Welche Termine habe ich morgen?"
+    s3, e3, exp3, desc3 = parse_calendar_query_range(q3, ref_now)
+    assert exp3 is True
+    assert s3 == datetime(2026, 11, 6, 0, 0, 0, tzinfo=berlin_tz)
+    assert e3 == datetime(2026, 11, 7, 0, 0, 0, tzinfo=berlin_tz)
+    assert "2026-11-06" in desc3
+
+    # 4. Named month: "Termine bis 8. November"
+    q4 = "Termine bis 8. November"
+    s4, e4, exp4, desc4 = parse_calendar_query_range(q4, ref_now)
+    assert exp4 is True
+    assert s4 == datetime(2026, 11, 5, 0, 0, 0, tzinfo=berlin_tz)
+    assert e4 == datetime(2026, 11, 9, 0, 0, 0, tzinfo=berlin_tz)
+
+    # 5. Weekday: "Termine bis Sonntag" (2026-11-05 is Thursday, Sunday is 2026-11-08)
+    q5 = "Termine bis Sonntag"
+    s5, e5, exp5, desc5 = parse_calendar_query_range(q5, ref_now)
+    assert exp5 is True
+    assert s5 == datetime(2026, 11, 5, 0, 0, 0, tzinfo=berlin_tz)
+    assert e5 == datetime(2026, 11, 9, 0, 0, 0, tzinfo=berlin_tz)
+
+    # 6. Default / today: "Was steht heute noch an?"
+    q6 = "Was steht heute noch an?"
+    s6, e6, exp6, desc6 = parse_calendar_query_range(q6, ref_now)
+    assert exp6 is False
+    assert s6 == datetime(2026, 11, 5, 0, 0, 0, tzinfo=berlin_tz)
+    assert e6 == datetime(2026, 11, 6, 0, 0, 0, tzinfo=berlin_tz)
+
+
+async def test_multi_day_calendar_query_includes_doctor_appointment_tomorrow(
+    db: Database,
+) -> None:
+    """Verify multi-day question up to 8.11.2026 includes doctor's appointment tomorrow and full final day."""
+    berlin_tz = ZoneInfo("Europe/Berlin")
+    ref_now = datetime(2026, 11, 5, 12, 40, 0, tzinfo=berlin_tz)
+
+    # Seed events matching user's scenario
+    # 1. Today (2026-11-05): Bachelorarbeit
+    await db.upsert_calendar_event(
+        event_id="evt_today_thesis",
+        title="Bachelorarbeit",
+        start_time=datetime(2026, 11, 5, 11, 30, tzinfo=berlin_tz),
+        end_time=datetime(2026, 11, 5, 12, 30, tzinfo=berlin_tz),
+        task_type="deep_work",
+        suitable_for_walking=True,
+    )
+    # 2. Tomorrow (2026-11-06): Morning routine
+    await db.upsert_calendar_event(
+        event_id="evt_tomorrow_wake",
+        title="Aufstehen, Zaehneputzen, Kacken",
+        start_time=datetime(2026, 11, 6, 7, 0, tzinfo=berlin_tz),
+        end_time=datetime(2026, 11, 6, 7, 15, tzinfo=berlin_tz),
+        task_type="admin",
+        suitable_for_walking=False,
+    )
+    # 3. Tomorrow (2026-11-06): Doctor's appointment (Augenarzt)
+    await db.upsert_calendar_event(
+        event_id="evt_tomorrow_doctor",
+        title="Augenarzt",
+        start_time=datetime(2026, 11, 6, 8, 30, tzinfo=berlin_tz),
+        end_time=datetime(2026, 11, 6, 9, 30, tzinfo=berlin_tz),
+        task_type="meeting",
+        suitable_for_walking=False,
+    )
+    # 4. Tomorrow (2026-11-06): Thesis block
+    await db.upsert_calendar_event(
+        event_id="evt_tomorrow_thesis",
+        title="Bachelorarbeit",
+        start_time=datetime(2026, 11, 6, 10, 0, tzinfo=berlin_tz),
+        end_time=datetime(2026, 11, 6, 13, 0, tzinfo=berlin_tz),
+        task_type="deep_work",
+        suitable_for_walking=True,
+    )
+    # 5. Day 3 (2026-11-07): Study session
+    await db.upsert_calendar_event(
+        event_id="evt_nov7_study",
+        title="Spanisch Grammatik",
+        start_time=datetime(2026, 11, 7, 15, 0, tzinfo=berlin_tz),
+        end_time=datetime(2026, 11, 7, 16, 0, tzinfo=berlin_tz),
+        task_type="reading",
+        suitable_for_walking=None,
+    )
+    # 6. Final day (2026-11-08): Late evening review on the final day
+    await db.upsert_calendar_event(
+        event_id="evt_nov8_evening",
+        title="Wochenabschluss & Review",
+        start_time=datetime(2026, 11, 8, 20, 0, tzinfo=berlin_tz),
+        end_time=datetime(2026, 11, 8, 21, 30, tzinfo=berlin_tz),
+        task_type="planning",
+        suitable_for_walking=False,
+    )
+    # 7. Beyond range (2026-11-09): Next week standup
+    await db.upsert_calendar_event(
+        event_id="evt_nov9_standup",
+        title="Next Week Standup",
+        start_time=datetime(2026, 11, 9, 9, 0, tzinfo=berlin_tz),
+        end_time=datetime(2026, 11, 9, 9, 30, tzinfo=berlin_tz),
+        task_type="meeting",
+        suitable_for_walking=False,
+    )
+
+    # Confirm sync coverage through Nov 14
+    await db.set_setting("calendar.synced_until", "2026-11-14T23:59:59+01:00")
+
+    question = "Was ist bis zum 8.11.2026 der wichtigste Termin?"
+    ctx = await build_assistant_context(db=db, question=question, now=ref_now)
+    cal = ctx["calendar"]
+
+    # Verify query range and full final day inclusion in Europe/Berlin
+    assert cal["query_range"]["start"].startswith("2026-11-05T00:00:00")
+    assert cal["query_range"]["end"].startswith("2026-11-09T00:00:00")
+    assert cal["query_range"]["full_final_day_included"] is True
+
+    # Data is complete because synced_until covers through Nov 14
+    assert cal["data_complete"] is True
+    assert cal["incomplete_reason"] is None
+
+    # Events in range must contain all events through Nov 8 (including tomorrow's doctor appointment)
+    event_titles = [e["title"] for e in cal["events"]]
+    assert "Augenarzt" in event_titles  # Doctor's appointment tomorrow included!
+    assert "Wochenabschluss & Review" in event_titles  # Full final day event included!
+    assert "Next Week Standup" not in event_titles  # Nov 9 excluded!
+
+    # Verify doctor's appointment structure
+    doctor_evt = next(e for e in cal["events"] if e["title"] == "Augenarzt")
+    assert doctor_evt["date"] == "2026-11-06"
+    assert doctor_evt["time_window"] == "08:30 – 09:30"
+    assert doctor_evt["suitable_for_walking"] is False
+
+    # events_today must remain today only
+    today_titles = [e["title"] for e in cal["events_today"]]
+    assert today_titles == ["Bachelorarbeit"]
+    assert "Augenarzt" not in today_titles
+
+
+async def test_multi_day_calendar_incomplete_data_detection(
+    db: Database,
+) -> None:
+    """Verify that if calendar sync only covers up to tomorrow, incomplete data is flagged."""
+    berlin_tz = ZoneInfo("Europe/Berlin")
+    ref_now = datetime(2026, 11, 5, 12, 40, 0, tzinfo=berlin_tz)
+
+    await db.upsert_calendar_event(
+        event_id="evt_today",
+        title="Bachelorarbeit",
+        start_time=datetime(2026, 11, 5, 11, 30, tzinfo=berlin_tz),
+        end_time=datetime(2026, 11, 5, 12, 30, tzinfo=berlin_tz),
+        task_type="deep_work",
+    )
+    await db.upsert_calendar_event(
+        event_id="evt_doc",
+        title="Augenarzt",
+        start_time=datetime(2026, 11, 6, 8, 30, tzinfo=berlin_tz),
+        end_time=datetime(2026, 11, 6, 9, 30, tzinfo=berlin_tz),
+        task_type="meeting",
+    )
+
+    # Sync was only 24 hours ahead (until Nov 6 12:40)
+    await db.set_setting("calendar.synced_until", "2026-11-06T12:40:00+01:00")
+
+    question = "Was ist bis zum 8.11.2026 der wichtigste Termin?"
+    ctx = await build_assistant_context(db=db, question=question, now=ref_now)
+    cal = ctx["calendar"]
+
+    assert cal["data_complete"] is False
+    assert cal["incomplete_reason"] is not None
+    assert "2026-11-06" in cal["incomplete_reason"]
+    assert "2026-11-08" in cal["incomplete_reason"] or "2026-11-09" in cal["incomplete_reason"]
+
+
+async def test_calendar_chat_prompt_guidelines_and_doctor_appointment(
+    llm_test_env: tuple[FastAPI, httpx.AsyncClient, list[dict[str, Any]]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify chat API receives requested date range, doctor's appointment, and guidelines separating walking suitability."""
+    app, client, captured = llm_test_env
+    captured.clear()
+    db = app.state.db
+    berlin_tz = ZoneInfo("Europe/Berlin")
+
+    # Mark calendar healthy and synced, and mock registry.is_enabled
+    orig_is_enabled = app.state.registry.is_enabled
+    monkeypatch.setattr(
+        app.state.registry,
+        "is_enabled",
+        lambda name: True if name == "google_calendar" else orig_is_enabled(name),
+    )
+    now_dt = datetime.now().astimezone()
+    await db.upsert_module_health(
+        module="google_calendar",
+        status="ok",
+        last_event_at=now_dt,
+        last_error=None,
+    )
+    # Sync through 14 days
+    await db.set_setting(
+        "calendar.synced_until",
+        (now_dt + timedelta(days=14)).isoformat(),
+    )
+
+    # Seed doctor's appointment tomorrow and thesis today
+    tomorrow = now_dt.date() + timedelta(days=1)
+    await db.upsert_calendar_event(
+        event_id="evt_thesis_today",
+        title="Bachelorarbeit",
+        start_time=datetime.combine(now_dt.date(), dt_time(11, 30), tzinfo=now_dt.tzinfo),
+        end_time=datetime.combine(now_dt.date(), dt_time(12, 30), tzinfo=now_dt.tzinfo),
+        task_type="deep_work",
+        suitable_for_walking=True,
+    )
+    await db.upsert_calendar_event(
+        event_id="evt_doctor_tomorrow",
+        title="Augenarzt",
+        start_time=datetime.combine(tomorrow, dt_time(8, 30), tzinfo=now_dt.tzinfo),
+        end_time=datetime.combine(tomorrow, dt_time(9, 30), tzinfo=now_dt.tzinfo),
+        task_type="meeting",
+        suitable_for_walking=False,
+    )
+
+    # Ask multi-day question
+    question = "Was ist bis zum 8.11.2026 der wichtigste Termin?"
+    resp = await client.post("/api/ask", json={"question": question})
+    assert resp.status_code == 200
+    assert len(captured) == 1
+
+    sys_prompt = captured[0]["body"]["messages"][0]["content"]
+
+    # Verify guidelines:
+    # 1. Incomplete data warning requirement
+    assert "Incomplete data requirement" in sys_prompt
+    assert "NEVER make a definitive claim about an entire" in sys_prompt
+
+    # 2. Movement suitability separated from appointment importance
+    assert "Movement suitability vs Appointment importance" in sys_prompt
+    assert "NEVER confuse or conflate movement suitability with appointment importance" in sys_prompt
+    assert "Do NOT volunteer walking or movement advice" in sys_prompt
+
+    # 3. Importance assessment must explain basis and acknowledge uncertainty
+    assert "Importance assessments" in sys_prompt
+    assert "explain the basis for your assessment" in sys_prompt
+    assert "acknowledge uncertainty" in sys_prompt
+
+    # 4. Context delivered to model contains doctor's appointment
+    assert "Augenarzt" in sys_prompt

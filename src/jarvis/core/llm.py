@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import re
 import time
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from datetime import time as dt_time
 from typing import Any
 
@@ -145,23 +146,198 @@ def validate_llm_response(parsed: Any) -> dict[str, Any]:
     }
 
 
+_MONTH_MAP: dict[str, int] = {
+    "jan": 1, "januar": 1, "january": 1,
+    "feb": 2, "februar": 2, "february": 2,
+    "mär": 3, "märz": 3, "mar": 3, "maerz": 3, "march": 3,
+    "apr": 4, "april": 4,
+    "mai": 5, "may": 5,
+    "jun": 6, "juni": 6, "june": 6,
+    "jul": 7, "juli": 7, "july": 7,
+    "aug": 8, "august": 8,
+    "sep": 9, "sept": 9, "september": 9,
+    "okt": 10, "oktober": 10, "oct": 10, "october": 10,
+    "nov": 11, "november": 11,
+    "dez": 12, "dezember": 12, "dec": 12, "december": 12,
+}
+
+_WEEKDAY_MAP: dict[str, int] = {
+    "montag": 0, "monday": 0,
+    "dienstag": 1, "tuesday": 1,
+    "mittwoch": 2, "wednesday": 2,
+    "donnerstag": 3, "thursday": 3,
+    "freitag": 4, "friday": 4,
+    "samstag": 5, "sonnabend": 5, "saturday": 5,
+    "sonntag": 6, "sunday": 6,
+}
+
+
+def parse_calendar_query_range(
+    question: str, now: datetime
+) -> tuple[datetime, datetime, bool, str]:
+    """Parse calendar date range from a user question.
+
+    Returns:
+        (time_min, time_max, is_explicit_range, range_description)
+    Where time_max includes the full final day in the user's timezone.
+    """
+    tz = now.tzinfo
+    q = question.lower()
+    today_start = datetime.combine(now.date(), dt_time.min, tzinfo=tz)
+    today_end = datetime.combine(now.date() + timedelta(days=1), dt_time.min, tzinfo=tz)
+
+    # 1. ISO format date: YYYY-MM-DD
+    iso_m = re.search(r"\b(\d{4})-(\d{1,2})-(\d{1,2})\b", q)
+    if iso_m:
+        y, m, d = int(iso_m.group(1)), int(iso_m.group(2)), int(iso_m.group(3))
+        target_d = date(y, m, d)
+        is_range = (
+            any(w in q for w in ["bis", "until", "through", "to"]) or target_d >= now.date()
+        )
+        start_dt = (
+            today_start if is_range else datetime.combine(target_d, dt_time.min, tzinfo=tz)
+        )
+        end_dt = datetime.combine(target_d + timedelta(days=1), dt_time.min, tzinfo=tz)
+        return start_dt, end_dt, True, f"{start_dt.date()} to {target_d} (full day)"
+
+    # 2. D.M.YYYY or D.M.YY or D.M. (e.g. 8.11.2026, 8.11.26, 8.11., 08.11.2026)
+    dm_m = re.search(r"\b(\d{1,2})\.(\d{1,2})\.?(?:(\d{4}|\d{2}))?\b", q)
+    if dm_m:
+        d = int(dm_m.group(1))
+        m = int(dm_m.group(2))
+        raw_y = dm_m.group(3)
+        if raw_y:
+            y = int(raw_y)
+            if y < 100:
+                y += 2000
+        else:
+            y = now.year
+            if date(y, m, d) < now.date() and not any(w in q for w in ["letzte", "last", "vergangene"]):
+                y += 1
+        target_d = date(y, m, d)
+        is_range = (
+            any(w in q for w in ["bis", "until", "through", "to"]) or target_d >= now.date()
+        )
+        start_dt = (
+            today_start if is_range else datetime.combine(target_d, dt_time.min, tzinfo=tz)
+        )
+        end_dt = datetime.combine(target_d + timedelta(days=1), dt_time.min, tzinfo=tz)
+        return start_dt, end_dt, True, f"{start_dt.date()} to {target_d} (full day)"
+
+    # 3. Named month (e.g. "8. November 2026", "Nov 8", "8th of November")
+    month_pattern = "|".join(sorted(_MONTH_MAP.keys(), key=len, reverse=True))
+    named_m = re.search(
+        r"\b(\d{1,2})\.?\s+(?:von\s+|of\s+)?(" + month_pattern + r")(?:\s+(\d{4}|\d{2}))?\b",
+        q,
+    )
+    if not named_m:
+        named_m = re.search(
+            r"\b(" + month_pattern + r")\s+(\d{1,2})(?:st|nd|rd|th)?(?:\s*,?\s*(\d{4}|\d{2}))?\b",
+            q,
+        )
+        if named_m:
+            m = _MONTH_MAP[named_m.group(1)]
+            d = int(named_m.group(2))
+            raw_y = named_m.group(3)
+        else:
+            m = None
+    else:
+        d = int(named_m.group(1))
+        m = _MONTH_MAP[named_m.group(2)]
+        raw_y = named_m.group(3)
+
+    if m is not None:
+        if raw_y:
+            y = int(raw_y)
+            if y < 100:
+                y += 2000
+        else:
+            y = now.year
+            if date(y, m, d) < now.date() and not any(w in q for w in ["letzte", "last", "vergangene"]):
+                y += 1
+        target_d = date(y, m, d)
+        is_range = (
+            any(w in q for w in ["bis", "until", "through", "to"]) or target_d >= now.date()
+        )
+        start_dt = (
+            today_start if is_range else datetime.combine(target_d, dt_time.min, tzinfo=tz)
+        )
+        end_dt = datetime.combine(target_d + timedelta(days=1), dt_time.min, tzinfo=tz)
+        return start_dt, end_dt, True, f"{start_dt.date()} to {target_d} (full day)"
+
+    # 4. Relative expressions:
+    if "übermorgen" in q or "day after tomorrow" in q:
+        target_d = now.date() + timedelta(days=2)
+        start_dt = datetime.combine(target_d, dt_time.min, tzinfo=tz)
+        end_dt = datetime.combine(target_d + timedelta(days=1), dt_time.min, tzinfo=tz)
+        return start_dt, end_dt, True, f"{target_d} (full day)"
+
+    if "morgen" in q or "tomorrow" in q:
+        target_d = now.date() + timedelta(days=1)
+        if any(w in q for w in ["bis", "until", "through", "und", "and"]):
+            start_dt = today_start
+        else:
+            start_dt = datetime.combine(target_d, dt_time.min, tzinfo=tz)
+        end_dt = datetime.combine(target_d + timedelta(days=1), dt_time.min, tzinfo=tz)
+        return start_dt, end_dt, True, f"{start_dt.date()} to {target_d} (full day)"
+
+    if "diese woche" in q or "this week" in q:
+        days_ahead = 6 - now.weekday()
+        target_d = now.date() + timedelta(days=days_ahead)
+        start_dt = today_start
+        end_dt = datetime.combine(target_d + timedelta(days=1), dt_time.min, tzinfo=tz)
+        return start_dt, end_dt, True, f"{start_dt.date()} to {target_d} (end of week full day)"
+
+    if "nächste woche" in q or "next week" in q:
+        days_to_next_mon = (7 - now.weekday()) % 7
+        if days_to_next_mon == 0:
+            days_to_next_mon = 7
+        next_mon = now.date() + timedelta(days=days_to_next_mon)
+        next_sun = next_mon + timedelta(days=6)
+        start_dt = datetime.combine(next_mon, dt_time.min, tzinfo=tz)
+        end_dt = datetime.combine(next_sun + timedelta(days=1), dt_time.min, tzinfo=tz)
+        return start_dt, end_dt, True, f"{next_mon} to {next_sun} (next week full days)"
+
+    for w_name, w_idx in _WEEKDAY_MAP.items():
+        if f"bis {w_name}" in q or f"until {w_name}" in q or f"durch {w_name}" in q:
+            days_ahead = (w_idx - now.weekday()) % 7
+            if days_ahead == 0:
+                days_ahead = 7
+            target_d = now.date() + timedelta(days=days_ahead)
+            start_dt = today_start
+            end_dt = datetime.combine(target_d + timedelta(days=1), dt_time.min, tzinfo=tz)
+            return start_dt, end_dt, True, f"{start_dt.date()} to {target_d} ({w_name} full day)"
+
+    next_n_m = re.search(r"(?:nächsten?|kommenden?|next)\s+(\d+)\s+(?:tage|tagen|days)", q)
+    if next_n_m:
+        n_days = int(next_n_m.group(1))
+        target_d = now.date() + timedelta(days=n_days)
+        start_dt = today_start
+        end_dt = datetime.combine(target_d + timedelta(days=1), dt_time.min, tzinfo=tz)
+        return start_dt, end_dt, True, f"{start_dt.date()} to {target_d} (full day)"
+
+    return today_start, today_end, False, f"{now.date()} (today)"
+
+
 async def build_assistant_context(
     db: Database,
     resolver: Any | None = None,
     timer_manager: Any | None = None,
     settings: Settings | None = None,
     registry: Any | None = None,
+    question: str | None = None,
+    now: datetime | None = None,
 ) -> dict[str, Any]:
     """Build a compact, privacy-safe JSON snapshot of platform state.
 
     Contains:
     - current activity, source, and elapsed duration
     - active desktop countdown timer status: kind, phase, remaining
-    - calendar state: status, availability, today's appointments, and current/next events
+    - calendar state: status, availability, date range, appointments, and current/next events
     - recent window categories and duration totals (never sensitive raw window titles)
     - pending recommendations
     """
-    now = now_local()
+    ref_now = ensure_aware(now) if now is not None else now_local()
 
     # 1. Effective activity state
     if resolver is not None and hasattr(resolver, "get_effective_state"):
@@ -175,7 +351,7 @@ async def build_assistant_context(
         current_span = await db.get_current_activity_span()
         if current_span:
             start_dt = ensure_aware(datetime.fromisoformat(str(current_span["started_at"])))
-            elapsed = max(0, int((now - start_dt).total_seconds()))
+            elapsed = max(0, int((ref_now - start_dt).total_seconds()))
             activity_data = {
                 "activity": current_span.get("activity", "unknown"),
                 "source": current_span.get("source", "system"),
@@ -201,7 +377,7 @@ async def build_assistant_context(
         if active_timer_row is not None:
             started_dt = ensure_aware(datetime.fromisoformat(str(active_timer_row["started_at"])))
             planned = active_timer_row.get("planned_duration_seconds")
-            elapsed = max(0, int((now - started_dt).total_seconds()))
+            elapsed = max(0, int((ref_now - started_dt).total_seconds()))
             remaining = max(0, int(planned) - elapsed) if planned is not None else 0
             raw_kind = str(active_timer_row.get("kind", ""))
             is_break = raw_kind.endswith("_break") or raw_kind == "break"
@@ -218,7 +394,22 @@ async def build_assistant_context(
                 "remaining_seconds": 0,
             }
 
-    # 3. Calendar: status, today's appointments, and current/next events
+    # 3. Calendar: status, appointments within requested range, today's appointments, and current/next events
+    start_of_today = datetime.combine(ref_now.date(), dt_time.min, tzinfo=ref_now.tzinfo)
+    end_of_today = datetime.combine(
+        ref_now.date() + timedelta(days=1), dt_time.min, tzinfo=ref_now.tzinfo
+    )
+
+    query_start = start_of_today
+    query_end = end_of_today
+    is_explicit_range = False
+    range_desc = f"{ref_now.date()} (today)"
+
+    if question:
+        query_start, query_end, is_explicit_range, range_desc = parse_calendar_query_range(
+            question, ref_now
+        )
+
     cal_enabled = False
     if registry is not None:
         cal_enabled = bool(registry.is_enabled("google_calendar"))
@@ -243,31 +434,49 @@ async def build_assistant_context(
         st_raw = str(row.get("start_time", ""))
         et_raw = str(row.get("end_time", ""))
         time_window = ""
+        date_str = ""
+        status = "upcoming"
         try:
             s_dt = ensure_aware(datetime.fromisoformat(st_raw))
             e_dt = ensure_aware(datetime.fromisoformat(et_raw))
+            date_str = s_dt.strftime("%Y-%m-%d")
             time_window = f"{s_dt.strftime('%H:%M')} – {e_dt.strftime('%H:%M')}"
+            if ref_now > e_dt:
+                status = "past"
+            elif ref_now >= s_dt:
+                status = "active"
+            else:
+                status = "upcoming"
         except Exception:
             time_window = f"{st_raw} – {et_raw}"
+        walking_val = row.get("suitable_for_walking")
+        walking_bool = bool(walking_val) if walking_val is not None else None
         return {
             "title": row.get("title", ""),
+            "date": date_str,
+            "status": status,
             "task_type": row.get("task_type", "unknown"),
             "start_time": st_raw,
             "end_time": et_raw,
             "time_window": time_window,
-            "suitable_for_walking": row.get("suitable_for_walking"),
+            "suitable_for_walking": walking_bool,
         }
 
     cur_row = None
     next_row = None
     events_today: list[dict[str, Any]] = []
+    events_range: list[dict[str, Any]] = []
+    data_complete = True
+    incomplete_reason: str | None = None
 
     if not cal_enabled:
         calendar_status = "disabled"
         calendar_available = False
+        data_complete = False
         calendar_message = (
             "Calendar integration is disabled in settings. Calendar data is unavailable."
         )
+        incomplete_reason = calendar_message
     else:
         health_row = await db.get_module_health("google_calendar")
         cal_instance = registry.get_module("google_calendar") if registry is not None else None
@@ -278,6 +487,7 @@ async def build_assistant_context(
         )
 
         if effective_status == "degraded" or last_error:
+            data_complete = False
             err_lower = (last_error or "").lower()
             if any(
                 kw in err_lower
@@ -295,6 +505,7 @@ async def build_assistant_context(
                 calendar_message = (
                     "Google Calendar event fetch failed. Calendar data is unavailable."
                 )
+            incomplete_reason = calendar_message
         else:
             has_synced = False
             if (
@@ -316,14 +527,12 @@ async def build_assistant_context(
             if not has_synced:
                 calendar_status = "not_fetched_yet"
                 calendar_available = False
+                data_complete = False
                 calendar_message = (
                     "Calendar events have not been fetched yet or are temporarily unavailable."
                 )
+                incomplete_reason = calendar_message
             else:
-                start_of_today = datetime.combine(now.date(), dt_time.min, tzinfo=now.tzinfo)
-                end_of_today = datetime.combine(
-                    now.date() + timedelta(days=1), dt_time.min, tzinfo=now.tzinfo
-                )
                 cal_id = (
                     settings.google_calendar.calendar_id
                     if settings is not None and hasattr(settings, "google_calendar")
@@ -334,23 +543,109 @@ async def build_assistant_context(
                     time_max=end_of_today,
                     calendar_id=cal_id,
                 )
-                cur_row, next_row = await db.get_current_and_next_events(now=now)
-                events_today = [_format_event(r) for r in today_rows if r is not None]
-
-                if not events_today:
-                    calendar_status = "no_events"
-                    calendar_available = True
-                    calendar_message = "No calendar appointments scheduled for today."
+                if is_explicit_range and (
+                    query_start != start_of_today or query_end != end_of_today
+                ):
+                    range_rows = await db.list_calendar_events(
+                        time_min=query_start,
+                        time_max=query_end,
+                        calendar_id=cal_id,
+                    )
                 else:
-                    calendar_status = "events_found"
-                    calendar_available = True
-                    calendar_message = f"{len(events_today)} appointment(s) scheduled for today."
+                    range_rows = today_rows
+
+                cur_row, next_row = await db.get_current_and_next_events(now=ref_now)
+                events_today = [_format_event(r) for r in today_rows if r is not None]
+                events_range = [_format_event(r) for r in range_rows if r is not None]
+
+                # Check data completeness for requested range
+                synced_until_val = await db.get_setting("calendar.synced_until")
+                synced_until_dt: datetime | None = None
+                if synced_until_val is not None:
+                    try:
+                        synced_until_dt = ensure_aware(
+                            datetime.fromisoformat(str(synced_until_val))
+                        )
+                    except Exception:
+                        pass
+                if synced_until_dt is None and registry is not None:
+                    cal_mod = registry.get_module("google_calendar")
+                    if cal_mod is not None:
+                        synced_until_dt = getattr(cal_mod, "_synced_until", None)
+
+                if synced_until_dt is not None:
+                    if query_end > synced_until_dt:
+                        data_complete = False
+                        incomplete_reason = (
+                            f"Calendar sync is only confirmed through {synced_until_dt.strftime('%Y-%m-%d %H:%M')}, "
+                            f"but requested range extends through {query_end.strftime('%Y-%m-%d')}. "
+                            "Events beyond this sync point may be missing."
+                        )
+                else:
+                    # synced_until is not explicitly stored in settings
+                    tomorrow_end = datetime.combine(
+                        ref_now.date() + timedelta(days=2), dt_time.min, tzinfo=ref_now.tzinfo
+                    )
+                    if query_end > tomorrow_end:
+                        all_cached = await db.list_calendar_events(calendar_id=cal_id)
+                        max_cached_end: datetime | None = None
+                        for ev in all_cached:
+                            try:
+                                ev_end = ensure_aware(
+                                    datetime.fromisoformat(
+                                        str(ev.get("end_time") or ev.get("start_time"))
+                                    )
+                                )
+                                if max_cached_end is None or ev_end > max_cached_end:
+                                    max_cached_end = ev_end
+                            except Exception:
+                                pass
+                        if max_cached_end is None or query_end > max_cached_end:
+                            data_complete = False
+                            max_str = (
+                                max_cached_end.strftime("%Y-%m-%d")
+                                if max_cached_end
+                                else "today"
+                            )
+                            incomplete_reason = (
+                                f"Calendar cache only contains events through {max_str}; requested range "
+                                f"extends through {query_end.strftime('%Y-%m-%d')}. Calendar data for later dates is incomplete."
+                            )
+
+                if is_explicit_range:
+                    if not events_range:
+                        calendar_status = "no_events"
+                        calendar_available = True
+                        calendar_message = f"No calendar appointments scheduled for {range_desc}."
+                    else:
+                        calendar_status = "events_found"
+                        calendar_available = True
+                        calendar_message = f"{len(events_range)} appointment(s) scheduled for {range_desc}."
+                else:
+                    if not events_today:
+                        calendar_status = "no_events"
+                        calendar_available = True
+                        calendar_message = "No calendar appointments scheduled for today."
+                    else:
+                        calendar_status = "events_found"
+                        calendar_available = True
+                        calendar_message = f"{len(events_today)} appointment(s) scheduled for today."
 
     calendar_data = {
         "status": calendar_status,
         "available": calendar_available,
+        "data_complete": data_complete,
+        "incomplete_reason": incomplete_reason,
         "message": calendar_message,
-        "date": now.date().isoformat(),
+        "date": ref_now.date().isoformat(),
+        "current_time": ref_now.isoformat(),
+        "query_range": {
+            "start": query_start.isoformat(),
+            "end": query_end.isoformat(),
+            "description": range_desc,
+            "full_final_day_included": True,
+        },
+        "events": events_range,
         "events_today": events_today,
         "current_event": _format_event(cur_row),
         "next_event": _format_event(next_row),
@@ -441,6 +736,19 @@ class OllamaClient:
             await self._client.aclose()
             self._client = None
 
+    async def list_models(self) -> list[str]:
+        """Query Ollama daemon for installed model names."""
+        client = await self._get_client()
+        url = f"{self.base_url}/api/tags"
+        try:
+            resp = await client.get(url)
+            if resp.status_code == 200:
+                data = resp.json()
+                return [str(m["name"]) for m in data.get("models", []) if "name" in m]
+        except Exception as exc:
+            logger.debug("Failed to list Ollama models: %s", exc)
+        return []
+
     async def chat(
         self,
         messages: list[dict[str, str]],
@@ -528,7 +836,48 @@ class OllamaClient:
         language: str | None = None,
     ) -> dict[str, Any]:
         """Ask a question given a platform context snapshot."""
-        ctx_str = json.dumps(context or {}, indent=2)
+        prompt_ctx = copy.deepcopy(context or {})
+        q_lower = question.lower()
+        asking_about_movement = any(
+            w in q_lower for w in ("walk", "geh", "spazier", "step", "posture", "haltung", "bewegung")
+        )
+        if not asking_about_movement:
+            if "calendar" in prompt_ctx and isinstance(prompt_ctx["calendar"], dict):
+                for ev in prompt_ctx["calendar"].get("events", []):
+                    if isinstance(ev, dict):
+                        ev.pop("suitable_for_walking", None)
+                for ev in prompt_ctx["calendar"].get("events_today", []):
+                    if isinstance(ev, dict):
+                        ev.pop("suitable_for_walking", None)
+
+        # When asking what not to miss or what is upcoming/most important, filter out already elapsed events
+        is_upcoming_or_unmissable = any(
+            w in q_lower
+            for w in (
+                "verpass", "miss", "wichtigst", "important", "ansteh", "upcoming",
+                "next", "nächste", "morgen", "tomorrow"
+            )
+        )
+        is_explicitly_asking_past = any(
+            w in q_lower
+            for w in ("hatte", "hatten", "vergangen", "past", "war", "waren", "did i have")
+        )
+        if is_upcoming_or_unmissable and not is_explicitly_asking_past:
+            if "calendar" in prompt_ctx and isinstance(prompt_ctx["calendar"], dict):
+                if "events" in prompt_ctx["calendar"]:
+                    upcoming = [
+                        ev for ev in prompt_ctx["calendar"]["events"]
+                        if isinstance(ev, dict) and ev.get("status") != "past"
+                    ]
+                    if upcoming:
+                        prompt_ctx["calendar"]["events"] = upcoming
+                if "events_today" in prompt_ctx["calendar"]:
+                    upcoming_today = [
+                        ev for ev in prompt_ctx["calendar"]["events_today"]
+                        if isinstance(ev, dict) and ev.get("status") != "past"
+                    ]
+                    prompt_ctx["calendar"]["events_today"] = upcoming_today
+        ctx_str = json.dumps(prompt_ctx, indent=2)
         lang_directive = (
             "- Language consistency: Always respond in the same language as the user's question "
             "(e.g. formulate the answer in natural German if the question is in German, "
@@ -553,15 +902,42 @@ class OllamaClient:
             "You must NEVER attempt to execute shell commands, directly change posture state, "
             "or modify settings.\n"
             "Calendar guidelines:\n"
+            "- Current time & upcoming appointments:\n"
+            "  * The current local time is given in 'current_time'. Events with status 'past' have\n"
+            "    already occurred and cannot be missed ('verpassen'). When asked about what is coming up\n"
+            "    or what not to miss, focus on upcoming events.\n"
             "- When calendar 'available' is false (e.g. status is disabled, not_authenticated,\n"
             "  fetch_failed, or not_fetched_yet), clearly state that calendar information is\n"
             "  unavailable or disabled and reference the reason given in the context.\n"
             "  NEVER claim or imply that the user has no appointments when calendar data\n"
             "  is unavailable.\n"
-            "- When calendar 'status' is 'no_events' (available is true), inform the user that\n"
-            "  they have no appointments scheduled for today.\n"
-            "- When calendar 'status' is 'events_found' (available is true), answer using\n"
-            "  'events_today', which contains all scheduled appointments for today.\n"
+            "- When calendar 'status' is 'no_events' (available is true) and 'data_complete' is true,\n"
+            "  inform the user that they have no appointments scheduled for the requested period.\n"
+            "- Date range & multi-day queries:\n"
+            "  * Use 'events' (or 'events_today' if query is only for today) which contains\n"
+            "    all scheduled appointments within the requested date range (including the\n"
+            "    full final day in the user's timezone).\n"
+            "  * Check 'data_complete' and 'incomplete_reason' in the calendar context.\n"
+            "  * Incomplete data requirement: If 'data_complete' is false or data is incomplete for the requested range,\n"
+            "    you MUST explicitly state that the calendar data is incomplete or only\n"
+            "    synced through a certain date/time, and that subsequent appointments in the\n"
+            "    requested timeframe may be missing. NEVER make a definitive claim about an entire\n"
+            "    period if the data is incomplete.\n"
+            "- Movement suitability vs Appointment importance:\n"
+            "  * 'suitable_for_walking' is purely an ergonomic/posture attribute indicating whether\n"
+            "    physical movement/walking is feasible during that event. It has NO relationship to\n"
+            "    appointment importance, priority, or urgency.\n"
+            "  * NEVER confuse or conflate movement suitability with appointment importance.\n"
+            "    Do NOT volunteer walking or movement advice when the user asks about appointment\n"
+            "    importance or scheduling, unless the user explicitly asks about posture or physical activity.\n"
+            "- Importance assessments:\n"
+            "  * When asked to assess which appointment is the most important or unmissable ('nicht verpassen'),\n"
+            "    evaluate UPCOMING appointments that have not yet ended (status != 'past'). A past event already took place\n"
+            "    and cannot be missed. NEVER choose a past event as an appointment not to miss when upcoming appointments are scheduled.\n"
+            "  * Medical and healthcare appointments (such as doctor visits, 'Augenarzt', clinic, dentist) must be prioritized\n"
+            "    as crucial health commitments that cannot easily be rescheduled.\n"
+            "  * You MUST explain the basis for your assessment (e.g. health necessity, academic deadlines)\n"
+            "    and acknowledge uncertainty (importance is subjective and personal to the user).\n"
             f"Current platform context:\n{ctx_str}"
         )
 
@@ -641,3 +1017,140 @@ async def classify_event_with_llm(
     finally:
         if own_client:
             await effective_client.close()
+
+
+WINDOW_CLASSIFICATION_JSON_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "category": {
+            "type": "string",
+            "enum": ["focused", "neutral", "distracted"],
+            "description": "Window focus state classification.",
+        },
+        "confidence": {
+            "type": "number",
+            "minimum": 0.0,
+            "maximum": 1.0,
+            "description": "Confidence score between 0.0 and 1.0.",
+        },
+        "reason": {
+            "type": "string",
+            "description": "Brief reason for the classification.",
+        },
+    },
+    "required": ["category", "confidence"],
+}
+
+
+async def classify_window_with_llm(
+    app_class: str = "",
+    window_title: str = "",
+    *,
+    calendar_task_type: str | None = None,
+    client: OllamaClient | None = None,
+    settings: Settings | None = None,
+    db: Database | None = None,
+    module_registry: Any = None,
+    model: str | None = None,
+) -> dict[str, Any] | None:
+    """Classify an ambiguous window into 'focused', 'neutral', or 'distracted' using a small local LLM."""
+    clean_app = app_class.strip()
+    clean_title = window_title.strip()
+    if not clean_app and not clean_title:
+        return {"category": "neutral", "confidence": 1.0}
+
+    # 1. Check if classification fallback is enabled in settings
+    if settings is not None:
+        llm_enabled = getattr(settings.llm, "enable_window_classification_fallback", False)
+        focus_enabled = (
+            getattr(settings.focus, "enable_llm_fallback", False)
+            if hasattr(settings, "focus")
+            else False
+        )
+        if not (llm_enabled or focus_enabled):
+            return None
+
+    # 2. Check if llm_ollama module is enabled if registry is provided
+    if module_registry is not None and hasattr(module_registry, "is_enabled"):
+        if not module_registry.is_enabled("llm_ollama"):
+            return None
+
+    effective_model = model
+    if effective_model is None and settings is not None:
+        effective_model = getattr(settings.focus, "llm_model", None) or getattr(
+            settings.llm, "text_model", None
+        )
+
+    effective_client = client or OllamaClient(model=effective_model or "qwen3:14b")
+    own_client = client is None
+
+    # Check installed models if needed
+    try:
+        available = await effective_client.list_models()
+        if available:
+            if effective_model and effective_model not in available:
+                # Find best matching installed model or fallback to first
+                matched = next(
+                    (m for m in available if effective_model.split(":")[0] in m),
+                    available[0],
+                )
+                effective_model = matched
+            elif not effective_model:
+                effective_model = available[0]
+    except Exception:
+        pass
+    if not effective_model:
+        effective_model = "qwen3:14b"
+
+    cal_task_line = f"Current Calendar Task: {calendar_task_type}\n" if calendar_task_type else ""
+
+    prompt = (
+        "Classify the following active desktop window into exactly one category from: "
+        "[focused, neutral, distracted].\n\n"
+        f"Application: {clean_app or 'Unknown'}\n"
+        f"Window Title: {clean_title or 'None'}\n"
+        f"{cal_task_line}\n"
+        "Guidance:\n"
+        "- 'focused': Productive work, coding, programming, software repositories (e.g. user/repo on GitHub/GitLab), "
+        "bachelor thesis / academic research, writing, studying, debugging, technical docs, design, professional tools, "
+        "or querying AI / web assistants (like Perplexity, ChatGPT, Claude) for knowledge, technical or research questions.\n"
+        "- 'distracted': Social media browsing (Reddit, Twitter, Instagram, TikTok), entertaining video streaming (YouTube, Netflix, Twitch), "
+        "gaming, memes, casual entertainment.\n"
+        "- 'neutral': System settings, file managers, calculators, calendar views, password managers, desktop utilities, email triage."
+    )
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are an assistant classifying desktop window activity into exactly one of: "
+                "focused, neutral, distracted. "
+                "Respond strictly with a JSON object containing 'category', 'confidence', and optional 'reason'."
+            ),
+        },
+        {"role": "user", "content": prompt},
+    ]
+
+    try:
+        res = await effective_client.chat(
+            messages,
+            model=effective_model,
+            format_schema=WINDOW_CLASSIFICATION_JSON_SCHEMA,
+        )
+        parsed = res.get("parsed") if isinstance(res.get("parsed"), dict) else res
+        cat = parsed.get("category")
+        confidence = float(parsed.get("confidence", 0.8))
+        if cat in {"focused", "neutral", "distracted"}:
+            return {
+                "category": cat,
+                "confidence": max(0.0, min(1.0, confidence)),
+                "reason": parsed.get("reason", ""),
+            }
+        return None
+    except Exception as exc:
+        logger.warning("classify_window_with_llm failed: %s", exc)
+        return None
+    finally:
+        if own_client:
+            await effective_client.close()
+
