@@ -1,0 +1,241 @@
+# ==============================================================================
+# Jarvis Tier-1 Window Focus Rules
+# Easily customizable and replaceable rules for window and application classification.
+# Categories: focused | neutral | distracted
+# ==============================================================================
+
+# Productive desktop application classes
+# Categorized automatically as 'focused'
+work_app_classes:
+  # --- Code Editors & IDEs ---
+  - "antigravity-ide"
+  - "code"
+  - "cursor"
+  - "vscodium"
+  - "pycharm"
+  - "idea"
+  - "clion"
+  - "webstorm"
+  - "rubymine"
+  - "goland"
+  - "rustrover"
+  - "datagrip"
+  - "zed"
+  - "neovim"
+  - "nvim"
+  - "emacs"
+  - "sublime_text"
+  - "sublime_merge"
+  - "helix"
+  - "kate"
+  - "gedit"
+
+  # --- Terminals & CLI Environments ---
+  - "kitty"
+  - "Alacritty"
+  - "alacritty"
+  - "wezterm"
+  - "ghostty"
+  - "foot"
+  - "konsole"
+  - "gnome-terminal"
+  - "xfce4-terminal"
+  - "terminator"
+  - "xterm"
+
+  # --- Bachelor Thesis, Academic Research, Notes & Scientific Writing ---
+  - "sioyek"          # Research paper PDF viewer
+  - "zotero"          # Reference & citation management
+  - "Zotero"
+  - "obsidian"        # Knowledge base & thesis notes
+  - "logseq"
+  - "mendeleydesktop" # Reference manager
+  - "mendeley"
+  - "jabref"          # BibTeX reference editor
+  - "texstudio"       # LaTeX IDE
+  - "kile"            # LaTeX editor
+  - "texmaker"        # LaTeX editor
+  - "lyx"             # Document processor
+  - "gummi"           # Live LaTeX editor
+  - "zettlr"          # Academic markdown editor
+  - "anytype"
+  - "joplin"
+  - "anki"            # Flashcard study
+  - "okular"          # Document & PDF viewer
+  - "evince"          # PDF viewer
+  - "zathura"         # Minimalist document viewer
+  - "calibre"         # E-book / PDF library
+  - "rstudio"         # Statistical analysis
+
+  # --- Diagrams, Schematics & Whiteboards ---
+  - "draw.io"
+  - "drawio"
+  - "inkscape"
+  - "xournalpp"       # Note annotation
+  - "rnote"           # Sketching & math notes
+
+# Distraction desktop application classes
+# Categorized automatically as 'distracted'
+distraction_app_classes:
+  - "steam"
+  - "lutris"
+  - "heroic"
+  - "spotify"
+  - "netflix"
+
+# Neutral desktop application classes (system utilities, password managers, settings)
+# Categorized automatically as 'neutral'
+neutral_app_classes:
+  - "pavucontrol"
+  - "helvum"
+  - "nautilus"
+  - "thunar"
+  - "dolphin"
+  - "pcmanfm"
+  - "nemo"
+  - "gnome-control-center"
+  - "systemsettings"
+  - "blueman-manager"
+  - "bitwarden"
+  - "1password"
+  - "keepassxc"
+  - "calculator"
+  - "gnome-calculator"
+  - "kcalc"
+
+# Browser window titles, websites & tools to categorize as 'focused'
+# Matches case-insensitively against Firefox, Chrome, or any active window title
+work_title_patterns:
+  # --- Academic Search, Journals & Thesis Resources ---
+  - "arXiv"
+  - "Google Scholar"
+  - "ResearchGate"
+  - "Semantic Scholar"
+  - "IEEE Xplore"
+  - "ACM Digital"
+  - "PubMed"
+  - "ScienceDirect"
+  - "SpringerLink"
+  - "JSTOR"
+  - "Wiley Online"
+  - "Nature"
+  - "Connected Papers"
+  - "Sci-Hub"
+  - "Overleaf"        # Collaborative LaTeX editor
+  - "Zotero"
+
+  # --- Software Development, Repositories & Docs ---
+  - "GitHub"
+  - "GitLab"
+  - "Bitbucket"
+  - "Stack Overflow"
+  - "Stack Exchange"
+  - "DevDocs"
+  - "MDN Web Docs"
+  - "docs.rs"
+  - "crates.io"
+  - "PyPI"
+  - "pkg.go.dev"
+  - "godoc"
+  - "Docker Hub"
+  - "Sourcegraph"
+  - "LeetCode"
+  - "HackerRank"
+  - "Kaggle"
+
+  # --- AI Assistants & LLMs ---
+  - "Gemini"
+  - "Google Gemini"
+  - "ChatGPT"
+  - "Claude"
+  - "Anthropic"
+  - "Perplexity"
+  - "DeepSeek"
+  - "Phind"
+
+  # --- Common Domains & URLs (when URL-in-title browser add-on is active) ---
+  - "github.com"
+  - "gitlab.com"
+  - "perplexity.ai"
+  - "chatgpt.com"
+  - "claude.ai"
+  - "gemini.google.com"
+  - "overleaf.com"
+  - "arxiv.org"
+  - "stackoverflow.com"
+
+  # --- Cloud Platforms & Dev Infrastructure ---
+  - "Google Cloud"
+  - "Google Auth Platform"
+  - "AWS Management Console"
+  - "Amazon Web Services"
+  - "Microsoft Azure"
+  - "Cloudflare"
+  - "Vercel"
+  - "Netlify"
+  - "Railway"
+  - "Fly.io"
+  - "Supabase"
+  - "Firebase"
+  - "Hugging Face"
+  - "Grafana"
+  - "Kibana"
+  - "Sentry"
+  - "Datadog"
+  - "Postman"
+
+  # --- Local Development, Platform & Design Tools ---
+  - "localhost"
+  - "127.0.0.1"
+  - "Jarvis Posture Platform"
+  - "Jarvis AI"
+  - "Pictogrammers"
+  - "Material Design Icons"
+  - "Iconify"
+  - "Font Awesome"
+  - "Figma"
+  - "Canva"
+
+  # --- Project Tracking & Knowledge Management ---
+  - "Jira"
+  - "Linear"
+  - "Confluence"
+  - "Trello"
+  - "Asana"
+  - "Notion"
+
+# Browser window titles & websites to categorize as 'distracted'
+distraction_title_patterns:
+  - "YouTube"
+  - "Reddit"
+  - "Twitch"
+  - "Twitter"
+  - "X"
+  - "TikTok"
+  - "Instagram"
+  - "Facebook"
+  - "Netflix"
+  - "Disney+"
+  - "Prime Video"
+  - "Hulu"
+  - "SoundCloud"
+  - "Steam"
+  - "Epic Games"
+  - "9GAG"
+  - "Pinterest"
+  - "Tumblr"
+  - "4chan"
+  - "Crunchyroll"
+
+# Browser window titles & apps to categorize as 'neutral'
+neutral_title_patterns:
+  - "Google Kalender"
+  - "Google Calendar"
+  - "Bitwarden"
+  - "1Password"
+  - "KeePass"
+  - "Proton Mail"
+  - "Gmail"
+  - "Outlook"
+  - "Thunderbird"
+

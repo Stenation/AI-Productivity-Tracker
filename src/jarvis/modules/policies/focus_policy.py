@@ -10,7 +10,16 @@ from datetime import datetime
 from typing import Any, Literal
 
 from jarvis.core.bus import EventBus
-from jarvis.core.classification import classify_window, is_call_window
+from jarvis.core.classification import (
+    DEFAULT_DISTRACTION_APP_CLASSES,
+    DEFAULT_DISTRACTION_TITLE_PATTERNS,
+    DEFAULT_NEUTRAL_APP_CLASSES,
+    DEFAULT_NEUTRAL_TITLE_PATTERNS,
+    DEFAULT_WORK_APP_CLASSES,
+    DEFAULT_WORK_TITLE_PATTERNS,
+    classify_window,
+    is_call_window,
+)
 from jarvis.core.database import Database
 from jarvis.core.schema import FocusState, PlatformEvent, ensure_aware, now_local
 from jarvis.modules.base import BaseModule
@@ -18,20 +27,6 @@ from jarvis.modules.base import BaseModule
 logger = logging.getLogger(__name__)
 
 DEFAULT_DISTRACTION_GRACE_SECONDS = 180
-DEFAULT_WORK_APP_CLASSES: tuple[str, ...] = (
-    "code",
-    "Alacritty",
-    "kitty",
-    "obsidian",
-    "Zotero",
-)
-DEFAULT_DISTRACTION_TITLE_PATTERNS: tuple[str, ...] = (
-    "YouTube",
-    "Reddit",
-    "Twitch",
-    "Twitter",
-    "X",
-)
 DEFAULT_CALENDAR_TASK_FOCUS_MAP: dict[str, FocusState] = {
     "meeting": "neutral",
     "break": "neutral",
@@ -78,6 +73,8 @@ def classify_focus_context(
     *,
     work_app_classes: Sequence[str] = DEFAULT_WORK_APP_CLASSES,
     distraction_title_patterns: Sequence[str] = DEFAULT_DISTRACTION_TITLE_PATTERNS,
+    work_title_patterns: Sequence[str] = DEFAULT_WORK_TITLE_PATTERNS,
+    neutral_title_patterns: Sequence[str] = DEFAULT_NEUTRAL_TITLE_PATTERNS,
     calendar_task_type: str | None = None,
 ) -> tuple[FocusState, str]:
     """Deterministically classify `(app_class, window_title)` per SPEC.MD FR-09.1."""
@@ -100,6 +97,18 @@ def classify_focus_context(
     ):
         return ("distracted", "title_pattern")
 
+    if clean_title and any(
+        _title_matches_pattern(clean_title, str(pattern))
+        for pattern in work_title_patterns
+    ):
+        return ("focused", "title_pattern")
+
+    if clean_title and any(
+        _title_matches_pattern(clean_title, str(pattern))
+        for pattern in neutral_title_patterns
+    ):
+        return ("neutral", "title_pattern")
+
     if calendar_task_type:
         norm_task = calendar_task_type.strip().lower()
         mapped = DEFAULT_CALENDAR_TASK_FOCUS_MAP.get(norm_task)
@@ -113,6 +122,8 @@ def classify_focus_context(
             active_task_type=norm_task,
             work_app_classes=work_app_classes,
             distraction_title_patterns=distraction_title_patterns,
+            work_title_patterns=work_title_patterns,
+            neutral_title_patterns=neutral_title_patterns,
         )
         if (
             correlated.category != "unknown"
@@ -121,6 +132,7 @@ def classify_focus_context(
             return (correlated.category, "calendar_correlation")
 
     return ("unknown", "default")
+
 
 
 class FocusPolicyModule(BaseModule):

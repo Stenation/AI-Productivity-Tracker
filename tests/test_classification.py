@@ -1266,3 +1266,171 @@ def test_classification_settings_defaults_and_custom_overrides() -> None:
     )
     assert res_cal.task_type == "meeting"
     assert res_cal.classifier == "explicit"
+
+
+def test_tier1_bachelor_thesis_and_writing_tools() -> None:
+    """Verify built-in detection of bachelor thesis writing and research tools (sioyek, zotero, etc.)."""
+    assert classify_window("sioyek", "Attention is All You Need.pdf").category == "focused"
+    assert classify_window("antigravity-ide", "jarvis - hyprland.lua").category == "focused"
+    assert classify_window("zotero", "Zotero - My Library").category == "focused"
+    assert classify_window("obsidian", "Thesis Outline.md").category == "focused"
+    assert classify_window("texstudio", "thesis.tex").category == "focused"
+    assert classify_window("cursor", "agent.py").category == "focused"
+
+
+def test_tier1_firefox_websites_direct_classification() -> None:
+    """Verify direct classification of Firefox sites using focus_rules.yaml."""
+    rules_settings = Settings(focus=FocusSettings(rules_file="focus_rules.yaml"))
+
+    # Academic & thesis research sites
+    res_arxiv = classify_window(
+        "firefox",
+        "arXiv:2401.12345 [cs.AI] Attention Mechanisms — Mozilla Firefox",
+        settings=rules_settings,
+    )
+    assert res_arxiv.category == "focused"
+
+    res_scholar = classify_window(
+        "firefox",
+        "posture tracking - Google Scholar — Mozilla Firefox",
+        settings=rules_settings,
+    )
+    assert res_scholar.category == "focused"
+
+    res_overleaf = classify_window(
+        "firefox",
+        "Bachelor Thesis 2026 - Overleaf, Online LaTeX Editor — Mozilla Firefox",
+        settings=rules_settings,
+    )
+    assert res_overleaf.category == "focused"
+
+    # AI & developer tools
+    res_gemini = classify_window(
+        "firefox",
+        "Fixing Icon Display - Google Gemini — Mozilla Firefox",
+        settings=rules_settings,
+    )
+    assert res_gemini.category == "focused"
+
+    res_cloud = classify_window(
+        "firefox",
+        "Zielgruppe – Google Auth Platform – Jarvis AI – Google Cloud Console — Mozilla Firefox",
+        settings=rules_settings,
+    )
+    assert res_cloud.category == "focused"
+
+    res_jarvis = classify_window(
+        "firefox",
+        "History · Jarvis Posture Platform — Mozilla Firefox",
+        settings=rules_settings,
+    )
+    assert res_jarvis.category == "focused"
+
+    res_icons = classify_window(
+        "firefox",
+        "Material Design Icons - Icon Library - Pictogrammers — Mozilla Firefox",
+        settings=rules_settings,
+    )
+    assert res_icons.category == "focused"
+
+    # Neutral and distracted
+    res_cal = classify_window(
+        "firefox",
+        "Google Kalender - 4 Tage, ab Donnerstag, 5. November 2026 — Mozilla Firefox",
+        settings=rules_settings,
+    )
+    assert res_cal.category == "neutral"
+
+    res_yt = classify_window(
+        "firefox",
+        "YouTube — Mozilla Firefox",
+        settings=rules_settings,
+    )
+    assert res_yt.category == "distracted"
+
+    # Git repository slug without explicit "GitHub" token
+    res_slug = classify_window(
+        "firefox",
+        "Stenation/AI-Productivity-Tracker — Mozilla Firefox",
+        settings=rules_settings,
+    )
+    assert res_slug.category == "focused"
+    assert res_slug.classifier == "title_rule"
+
+    res_slug_desc = classify_window(
+        "firefox",
+        "Stenation/AI-Productivity-Tracker: Posture platform with AI",
+        settings=rules_settings,
+    )
+    assert res_slug_desc.category == "focused"
+
+
+
+def test_custom_rules_file_is_easily_replaceable(tmp_path: Any) -> None:
+    """Verify users can provide a custom rules file without modifying source code."""
+    custom_rules = tmp_path / "my_custom_rules.yaml"
+    custom_rules.write_text(
+        """
+work_app_classes:
+  - "custom_research_tool"
+work_title_patterns:
+  - "Niche Research Lab"
+distraction_app_classes:
+  - "custom_timewaster"
+neutral_title_patterns:
+  - "Custom Utility Dashboard"
+""",
+        encoding="utf-8",
+    )
+
+    settings = Settings(focus=FocusSettings(rules_file=custom_rules))
+
+    assert classify_window("custom_research_tool", "Window 1", settings=settings).category == "focused"
+    assert classify_window("firefox", "Niche Research Lab Portal", settings=settings).category == "focused"
+    assert classify_window("custom_timewaster", "Game", settings=settings).category == "distracted"
+    assert classify_window("firefox", "Custom Utility Dashboard", settings=settings).category == "neutral"
+
+
+@pytest.mark.asyncio
+async def test_classify_window_async_llm_fallback_and_cache() -> None:
+    """Verify classify_window_async delegates unknown windows to LLM and caches result."""
+    from jarvis.core.classification import (
+        clear_window_llm_cache,
+        classify_window_async,
+        get_window_llm_cache,
+    )
+
+    clear_window_llm_cache()
+    calls = []
+
+    async def mock_llm(app_class: str, window_title: str, **kwargs: Any) -> dict[str, Any]:
+        calls.append((app_class, window_title))
+        return {"category": "focused", "confidence": 0.85, "reason": "Academic paper"}
+
+    # 1. Deterministic known app does NOT call LLM
+    res_known = await classify_window_async(
+        "antigravity-ide", "main.py", llm_fallback=mock_llm
+    )
+    assert res_known.category == "focused"
+    assert res_known.classifier == "app_class"
+    assert len(calls) == 0
+
+    # 2. Unknown window calls LLM
+    res_unknown = await classify_window_async(
+        "firefox", "Unusual Science Blog Article", llm_fallback=mock_llm
+    )
+    assert res_unknown.category == "focused"
+    assert res_unknown.classifier == "llm"
+    assert res_unknown.confidence == 0.85
+    assert len(calls) == 1
+
+    # 3. Subsequent call is served from cache without invoking LLM again
+    res_cached = await classify_window_async(
+        "firefox", "Unusual Science Blog Article", llm_fallback=mock_llm
+    )
+    assert res_cached.category == "focused"
+    assert res_cached.classifier == "llm"
+    assert len(calls) == 1  # No second call!
+
+    clear_window_llm_cache()
+

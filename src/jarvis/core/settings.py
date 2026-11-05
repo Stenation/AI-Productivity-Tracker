@@ -20,6 +20,17 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config.yaml"
 DEFAULT_MIGRATIONS_DIR = PROJECT_ROOT / "migrations"
 
+from jarvis.core.classification import (
+    DEFAULT_DISTRACTION_APP_CLASSES,
+    DEFAULT_DISTRACTION_TITLE_PATTERNS,
+    DEFAULT_NEUTRAL_APP_CLASSES,
+    DEFAULT_NEUTRAL_TITLE_PATTERNS,
+    DEFAULT_WORK_APP_CLASSES,
+    DEFAULT_WORK_TITLE_PATTERNS,
+    load_focus_rules,
+)
+
+
 _ACTIVE_YAML_DATA: ContextVar[dict[str, Any] | None] = ContextVar(
     "_ACTIVE_YAML_DATA", default=None
 )
@@ -173,16 +184,25 @@ class FocusSettings(BaseModel):
     phone_unlock_limit_seconds: int = Field(default=60, ge=0)
     max_prompts_per_hour: int = Field(default=4, ge=0)
     recommendation_cooldown_minutes: int = Field(default=15, ge=0)
+    rules_file: Path | str | None = None
     work_app_classes: list[str] = Field(
-        default_factory=lambda: ["code", "Alacritty", "kitty", "obsidian", "Zotero"]
+        default_factory=lambda: list(DEFAULT_WORK_APP_CLASSES)
     )
-    distraction_app_classes: list[str] = Field(default_factory=list)
-    neutral_app_classes: list[str] = Field(default_factory=list)
+    distraction_app_classes: list[str] = Field(
+        default_factory=lambda: list(DEFAULT_DISTRACTION_APP_CLASSES)
+    )
+    neutral_app_classes: list[str] = Field(
+        default_factory=lambda: list(DEFAULT_NEUTRAL_APP_CLASSES)
+    )
     distraction_title_patterns: list[str] = Field(
-        default_factory=lambda: ["YouTube", "Reddit", "Twitch", "Twitter", "X"]
+        default_factory=lambda: list(DEFAULT_DISTRACTION_TITLE_PATTERNS)
     )
-    work_title_patterns: list[str] = Field(default_factory=list)
-    neutral_title_patterns: list[str] = Field(default_factory=list)
+    work_title_patterns: list[str] = Field(
+        default_factory=lambda: list(DEFAULT_WORK_TITLE_PATTERNS)
+    )
+    neutral_title_patterns: list[str] = Field(
+        default_factory=lambda: list(DEFAULT_NEUTRAL_TITLE_PATTERNS)
+    )
     call_app_classes: list[str] = Field(
         default_factory=lambda: [
             "zoom",
@@ -206,6 +226,34 @@ class FocusSettings(BaseModel):
         ]
     )
     app_class_rules: dict[str, str] = Field(default_factory=dict)
+    enable_llm_fallback: bool = False
+    llm_model: str = "qwen2.5:1.5b"
+    llm_min_dwell_seconds: float = Field(default=3.0, ge=0.0)
+    llm_timeout_seconds: float = Field(default=10.0, gt=0.0)
+
+    @model_validator(mode="after")
+    def _apply_rules_file(self) -> FocusSettings:
+        if self.rules_file is not None:
+            rules_data = load_focus_rules(self.rules_file)
+            if rules_data:
+                for field in (
+                    "work_app_classes",
+                    "distraction_app_classes",
+                    "neutral_app_classes",
+                    "work_title_patterns",
+                    "distraction_title_patterns",
+                    "neutral_title_patterns",
+                    "call_app_classes",
+                    "call_title_patterns",
+                ):
+                    if field in rules_data and rules_data[field]:
+                        setattr(self, field, list(rules_data[field]))
+                if "app_class_rules" in rules_data and isinstance(rules_data["app_class_rules"], dict):
+                    merged = dict(self.app_class_rules)
+                    merged.update(rules_data["app_class_rules"])
+                    self.app_class_rules = merged
+        return self
+
 
 
 class CalendarClassificationSettings(BaseModel):
@@ -351,6 +399,7 @@ class GoogleCalendarSettings(BaseModel):
 
     calendar_id: str = "primary"
     sync_interval_minutes: int = Field(default=15, ge=1)
+    sync_days_ahead: int = Field(default=14, ge=1)
     oauth_token_path: Path = Path("~/.local/share/posture-platform/google-token.json")
     credentials_path: Path | None = None
     read_only: bool = True
@@ -411,6 +460,7 @@ class LlmSettings(BaseModel):
     keep_alive_minutes: int = Field(default=5, ge=0)
     timeout_seconds: float = Field(default=30.0, gt=0)
     enable_classification_fallback: bool = False
+    enable_window_classification_fallback: bool = False
 
 
 class WaybarSettings(BaseModel):

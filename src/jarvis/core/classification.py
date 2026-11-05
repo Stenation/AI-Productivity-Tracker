@@ -12,14 +12,19 @@ import logging
 import re
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timedelta
+from pathlib import Path
 from re import Pattern
 from typing import Any, Literal
 
+import yaml
 from pydantic import BaseModel, ConfigDict, Field
 
 from jarvis.core.schema import CalendarEvent, FocusState, TaskType, now_local
 
 logger = logging.getLogger(__name__)
+
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+
 
 VALID_TASK_TYPES: frozenset[TaskType] = frozenset({
     "deep_work",
@@ -690,6 +695,11 @@ DEFAULT_WORK_APP_CLASSES: tuple[str, ...] = (
     "kitty",
     "obsidian",
     "Zotero",
+    "antigravity-ide",
+    "cursor",
+    "zed",
+    "sioyek",
+    "texstudio",
 )
 
 DEFAULT_DISTRACTION_APP_CLASSES: tuple[str, ...] = ()
@@ -703,6 +713,38 @@ DEFAULT_DISTRACTION_TITLE_PATTERNS: tuple[str, ...] = (
     "Twitter",
     "X",
 )
+
+DEFAULT_WORK_TITLE_PATTERNS: tuple[str, ...] = ()
+
+DEFAULT_NEUTRAL_TITLE_PATTERNS: tuple[str, ...] = ()
+
+def load_focus_rules(rules_path: Path | str | None = None) -> dict[str, Any]:
+    """Load external focus rules YAML file if present, returning a dictionary of rules."""
+    candidates: list[Path] = []
+    if rules_path is not None:
+        p = Path(rules_path).expanduser()
+        candidates.append(p)
+        if not p.is_absolute():
+            candidates.append(PROJECT_ROOT / p)
+    else:
+        candidates.extend([
+            PROJECT_ROOT / "focus_rules.yaml",
+            PROJECT_ROOT / "config" / "focus_rules.yaml",
+            Path.home() / ".config" / "posture-platform" / "focus_rules.yaml",
+            Path.home() / ".config" / "jarvis" / "focus_rules.yaml",
+        ])
+
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_file():
+            try:
+                with candidate.open("r", encoding="utf-8") as f:
+                    data = yaml.safe_load(f)
+                if isinstance(data, dict):
+                    return data
+            except Exception as exc:
+                logger.warning("Failed to load focus rules from %s: %s", candidate, exc)
+    return {}
+
 
 DEFAULT_CALL_APP_CLASSES: tuple[str, ...] = (
     "zoom",
@@ -768,6 +810,11 @@ _ADMIN_CORRELATION_REGEX: Pattern[str] = re.compile(
 _PLANNING_CORRELATION_REGEX: Pattern[str] = re.compile(
     r"(?i)\b(planning|plan|roadmap|backlog|sprint|jira|linear|trello|asana|board|prioritization|okr|review)\b"
 )
+
+_REPO_SLUG_REGEX: Pattern[str] = re.compile(
+    r"^[a-zA-Z0-9_\-\.]+\/[a-zA-Z0-9_\-\.]+(\s*[:—\-]|\s*$)"
+)
+
 
 
 class WindowClassificationResult(BaseModel):
@@ -1043,12 +1090,12 @@ def classify_window(
     resolved_work_titles = (
         work_title_patterns
         if work_title_patterns is not None
-        else _get_cfg("work_title_patterns", ())
+        else _get_cfg("work_title_patterns", DEFAULT_WORK_TITLE_PATTERNS)
     )
     resolved_neutral_titles = (
         neutral_title_patterns
         if neutral_title_patterns is not None
-        else _get_cfg("neutral_title_patterns", ())
+        else _get_cfg("neutral_title_patterns", DEFAULT_NEUTRAL_TITLE_PATTERNS)
     )
     resolved_call_apps = (
         call_app_classes
@@ -1163,6 +1210,21 @@ def classify_window(
                 confidence=0.90,
             )
 
+        # Check for Git repository slug (owner/repo) in title
+        title_no_browser = re.sub(
+            r"\s*([—\-]\s*(Mozilla Firefox|Google Chrome|Chromium|Brave|Edge))\s*$",
+            "",
+            clean_title,
+            flags=re.IGNORECASE,
+        ).strip()
+        if _REPO_SLUG_REGEX.search(title_no_browser):
+            return WindowClassificationResult(
+                category="focused",
+                classifier="title_rule",
+                is_call_window=call_detected,
+                confidence=0.90,
+            )
+
         if resolved_neutral_titles and any(
             _title_matches_pattern(clean_title, str(p))
             for p in resolved_neutral_titles
@@ -1199,3 +1261,84 @@ def classify_window(
         is_call_window=call_detected,
         confidence=0.0,
     )
+
+
+_WINDOW_LLM_CACHE: dict[tuple[str, str], WindowClassificationResult] = {}
+
+
+def get_window_llm_cache() -> dict[tuple[str, str], WindowClassificationResult]:
+    """Return the global in-memory window LLM classification cache."""
+    return _WINDOW_LLM_CACHE
+
+
+def clear_window_llm_cache() -> None:
+    """Clear the global in-memory window LLM classification cache."""
+    _WINDOW_LLM_CACHE.clear()
+
+
+async def classify_window_async(
+    app_class: str,
+    window_title: str,
+    *,
+    active_task_type: str | None = None,
+    calendar_task_type: str | None = None,
+    settings: Any | None = None,
+    llm_classifier: Callable[..., Any] | None = None,
+    llm_fallback: Callable[..., Any] | None = None,
+    **kwargs: Any,
+) -> WindowClassificationResult:
+    """Classify window focus asynchronously, evaluating deterministic rules first and LLM fallback if unknown."""
+    # 1. Deterministic Tier-1 classification
+    res = classify_window(
+        app_class,
+        window_title,
+        active_task_type=active_task_type,
+        calendar_task_type=calendar_task_type,
+        settings=settings,
+        **kwargs,
+    )
+    if res.category != "unknown":
+        return res
+
+    clean_class = str(app_class).strip()
+    clean_title = str(window_title).strip()
+    if not clean_class and not clean_title:
+        return res
+
+    cache_key = (clean_class.lower(), clean_title.lower())
+    if cache_key in _WINDOW_LLM_CACHE:
+        return _WINDOW_LLM_CACHE[cache_key]
+
+    effective_llm = llm_classifier or llm_fallback
+    if effective_llm is not None:
+        try:
+            llm_res: Any = None
+            if inspect.iscoroutinefunction(effective_llm):
+                llm_res = await effective_llm(
+                    app_class=clean_class,
+                    window_title=clean_title,
+                    calendar_task_type=active_task_type or calendar_task_type,
+                )
+            else:
+                llm_res = effective_llm(
+                    app_class=clean_class,
+                    window_title=clean_title,
+                    calendar_task_type=active_task_type or calendar_task_type,
+                )
+            if isinstance(llm_res, Mapping):
+                cat = str(llm_res.get("category", "")).strip().lower()
+                conf = float(llm_res.get("confidence", 0.8))
+                if cat in VALID_FOCUS_CATEGORIES and cat != "unknown":
+                    result = WindowClassificationResult(
+                        category=cat,  # type: ignore[arg-type]
+                        classifier="llm",
+                        is_call_window=res.is_call_window,
+                        confidence=max(0.0, min(1.0, conf)),
+                    )
+                    _WINDOW_LLM_CACHE[cache_key] = result
+                    return result
+        except Exception as exc:
+            logger.warning("Window classification LLM fallback failed: %s", exc)
+
+    return res
+
