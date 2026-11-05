@@ -28,16 +28,14 @@ DEFAULT_REFRESH_INTERVAL_SECONDS = 15.0
 DEFAULT_WAYBAR_SIGNAL = 8
 WAYBAR_FILE_ENV_VAR = "POSTURE_WAYBAR_FILE"
 
-_VALID_ACTIVITIES: frozenset[str] = frozenset(
-    {"sitting", "standing", "walking", "away", "unknown"}
-)
+_VALID_ACTIVITIES: frozenset[str] = frozenset({"sitting", "standing", "walking", "away", "unknown"})
 
 _ACTIVITY_DISPLAY: dict[ActivityState, tuple[str, str, str]] = {
-    "sitting": ("󰔄", "SIT", "Sitting"),
-    "standing": ("󰋑", "STAND", "Standing"),
-    "walking": ("󰗉", "WALK", "Walking"),
-    "away": ("󰍃", "AWAY", "Away"),
-    "unknown": ("󰘥", "UNKNOWN", "Unknown"),
+    "sitting": ("\U000f0482", "SIT", "Sitting"),
+    "standing": ("\uf183", "STAND", "Standing"),
+    "walking": ("\U000f0583", "WALK", "Walking"),
+    "away": ("\U000f0343", "AWAY", "Away"),
+    "unknown": ("\U000f0625", "UNKNOWN", "Unknown"),
 }
 
 _PAUSE_BADGE = "󰏤 PAUSED"
@@ -204,9 +202,7 @@ class WaybarStatusModule(BaseModule):
     async def health(self) -> dict[str, Any]:
         """Return current module health payload."""
         status = (
-            "degraded"
-            if self._last_error is not None
-            else ("ok" if self._running else "disabled")
+            "degraded" if self._last_error is not None else ("ok" if self._running else "disabled")
         )
         return {
             "module": self.name,
@@ -302,9 +298,7 @@ class WaybarStatusModule(BaseModule):
                 text_parts.append(f"{kind_label} BREAK {remaining_minutes}m")
             else:
                 text_parts.append(f"{kind_label} {remaining_minutes}m")
-            tooltip_lines.append(
-                f"Timer: {kind_label} ({timer_phase}, {remaining_minutes}m left)"
-            )
+            tooltip_lines.append(f"Timer: {kind_label} ({timer_phase}, {remaining_minutes}m left)")
 
         if self._privacy_paused:
             text_parts.append(_PAUSE_BADGE)
@@ -329,9 +323,7 @@ class WaybarStatusModule(BaseModule):
             tooltip_lines.append("Next: none")
 
         if override_expires_at is not None and override_expires_at > ref_now:
-            mins_left = max(
-                1, math.ceil((override_expires_at - ref_now).total_seconds() / 60)
-            )
+            mins_left = max(1, math.ceil((override_expires_at - ref_now).total_seconds() / 60))
             exp_local = override_expires_at.astimezone().strftime("%H:%M")
             tooltip_lines.append(
                 f"Manual override: until {exp_local} ({mins_left}m, source: {source})"
@@ -476,9 +468,7 @@ class WaybarStatusModule(BaseModule):
         now: datetime,
     ) -> None:
         raw_act = str(span.get("activity", "unknown"))
-        self._activity = (
-            cast(ActivityState, raw_act) if raw_act in _VALID_ACTIVITIES else "unknown"
-        )
+        self._activity = cast(ActivityState, raw_act) if raw_act in _VALID_ACTIVITIES else "unknown"
         self._activity_source = str(span.get("source", "system"))
         self._activity_reason = str(span.get("reason", "state_change"))
         started_dt = _parse_dt(span.get("started_at")) or now
@@ -524,8 +514,7 @@ class WaybarStatusModule(BaseModule):
                 ):
                     exp = (
                         self._override_expires_at
-                        if self._override_expires_at is not None
-                        and self._override_expires_at > now
+                        if self._override_expires_at is not None and self._override_expires_at > now
                         else None
                     )
                     return (
@@ -537,9 +526,7 @@ class WaybarStatusModule(BaseModule):
 
                 raw_act = str(db_span.get("activity", "unknown"))
                 act: ActivityState = (
-                    cast(ActivityState, raw_act)
-                    if raw_act in _VALID_ACTIVITIES
-                    else "unknown"
+                    cast(ActivityState, raw_act) if raw_act in _VALID_ACTIVITIES else "unknown"
                 )
                 src = str(db_span.get("source", "system"))
                 effective_start = db_start or now
@@ -592,16 +579,10 @@ class WaybarStatusModule(BaseModule):
         return None
 
     def _compute_timer_remaining(self, now: datetime) -> int:
-        if (
-            self._timer_remaining_anchor is not None
-            and self._timer_anchor_at is not None
-        ):
+        if self._timer_remaining_anchor is not None and self._timer_anchor_at is not None:
             elapsed = max(0.0, (now - self._timer_anchor_at).total_seconds())
             return max(0, math.ceil(self._timer_remaining_anchor - elapsed))
-        if (
-            self._timer_planned_seconds is not None
-            and self._timer_started_at is not None
-        ):
+        if self._timer_planned_seconds is not None and self._timer_started_at is not None:
             elapsed = max(0.0, (now - self._timer_started_at).total_seconds())
             return max(0, math.ceil(self._timer_planned_seconds - elapsed))
         if self._timer_remaining_anchor is not None:
@@ -666,16 +647,19 @@ class WaybarStatusModule(BaseModule):
         phase = str(payload.get("phase") or "idle")
         transition = str(payload.get("transition") or "")
 
-        if active and phase in ("work", "break") and transition not in (
-            "completed",
-            "stopped",
+        if (
+            active
+            and phase in ("work", "break")
+            and transition
+            not in (
+                "completed",
+                "stopped",
+            )
         ):
             raw_kind = str(payload.get("kind") or "custom")
             self._timer_active = True
             self._timer_kind = (
-                raw_kind.removesuffix("_break")
-                if raw_kind.endswith("_break")
-                else raw_kind
+                raw_kind.removesuffix("_break") if raw_kind.endswith("_break") else raw_kind
             )
             self._timer_phase = "break" if phase == "break" else "work"
             self._timer_started_at = _parse_dt(payload.get("started_at")) or event_time

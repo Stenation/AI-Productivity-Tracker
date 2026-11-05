@@ -110,7 +110,7 @@ async def test_waybar_atomic_json_generation_and_activity_states(
         now = t0 + timedelta(minutes=14, seconds=30)
         sit_payload = await waybar.refresh()
         assert sit_payload["class"] == "sitting"
-        assert sit_payload["text"] == "󰔄 SIT 14m"
+        assert sit_payload["text"] == "\U000f0482 SIT 14m"
         assert "Sitting (14m)" in sit_payload["tooltip"]
         expected_hm = override_exp.astimezone().strftime("%H:%M")
         assert (
@@ -121,7 +121,7 @@ async def test_waybar_atomic_json_generation_and_activity_states(
         # Once clock advances past override_expires_at, manual override resets to 'none'
         now = t0 + timedelta(minutes=31)
         expired_payload = await waybar.refresh()
-        assert expired_payload["text"] == "󰔄 SIT 31m"
+        assert expired_payload["text"] == "\U000f0482 SIT 31m"
         assert "Manual override: none" in expired_payload["tooltip"]
 
         for state, expected_label in (
@@ -240,7 +240,7 @@ async def test_waybar_timers_calendar_recommendations_and_privacy_dnd(
         )
 
         data = _read_status_json(status_file)
-        assert data["text"] == "󰗉 WALK 12m · 50/10 22m"
+        assert data["text"] == "󰖃 WALK 12m · 50/10 22m"
         assert data["class"] == "walking"
         assert "Walking (12m)" in data["tooltip"]
         assert "Timer: 50/10 (work, 22m left)" in data["tooltip"]
@@ -270,7 +270,7 @@ async def test_waybar_timers_calendar_recommendations_and_privacy_dnd(
             )
         )
         break_data = _read_status_json(status_file)
-        assert break_data["text"] == "󰗉 WALK 12m · 50/10 BREAK 10m"
+        assert break_data["text"] == "󰖃 WALK 12m · 50/10 BREAK 10m"
         assert "Timer: 50/10 (break, 10m left)" in break_data["tooltip"]
 
         # Pending recommendation created & resolved updates tooltip count
@@ -336,7 +336,7 @@ async def test_waybar_timers_calendar_recommendations_and_privacy_dnd(
                 },
             )
         )
-        assert _read_status_json(status_file)["text"] == "󰗉 WALK 12m"
+        assert _read_status_json(status_file)["text"] == "󰖃 WALK 12m"
 
         # Enable DND mode -> class becomes "dnd", DND indicator shown
         await bus.publish(
@@ -390,7 +390,7 @@ async def test_waybar_timers_calendar_recommendations_and_privacy_dnd(
         )
         resumed = _read_status_json(status_file)
         assert resumed["class"] == "walking"
-        assert resumed["text"] == "󰗉 WALK 12m"
+        assert resumed["text"] == "󰖃 WALK 12m"
     finally:
         await waybar.stop()
 
@@ -441,15 +441,13 @@ async def test_waybar_periodic_refresh_signaling_recovery_and_registry(
         # Recovered standing 5m + manual override on start, and signaled Waybar without raising
         initial = _read_status_json(status_file)
         assert initial["class"] == "standing"
-        assert initial["text"] == "󰋑 STAND 5m"
+        assert initial["text"] == " STAND 5m"
         assert "source: waybar" in initial["tooltip"]
         assert "-RTMIN+8 waybar" in pkill_log.read_text(encoding="utf-8")
 
         # Advance clock by 8 minutes -> periodic loop updates elapsed duration automatically
         now = t0 + timedelta(minutes=8)
-        await _wait_until(
-            lambda: _read_status_json(status_file)["text"] == "󰋑 STAND 13m"
-        )
+        await _wait_until(lambda: _read_status_json(status_file)["text"] == " STAND 13m")
     finally:
         await waybar.stop()
 
@@ -548,7 +546,7 @@ async def test_posture_status_script_online_offline_and_static_configs(
     # 3. Valid online file -> prints exact single-line JSON
     online_path = tmp_path / "online.json"
     expected_online = {
-        "text": "󰗉 WALK 12m · 50/10 22m",
+        "text": "󰖃 WALK 12m · 50/10 22m",
         "tooltip": "Walking (12m)\nCurrent: Backend refactor\nNext: Meeting in 38m",
         "class": "walking",
     }
@@ -571,10 +569,7 @@ async def test_posture_status_script_online_offline_and_static_configs(
     assert custom_posture["signal"] == 8
     assert "http://127.0.0.1:8000/api/activity/cycle" in custom_posture["on-click"]
     assert "http://127.0.0.1:8000" in custom_posture["on-click-right"]
-    assert (
-        "http://127.0.0.1:8000/api/recommendations/snooze"
-        in custom_posture["on-click-middle"]
-    )
+    assert "http://127.0.0.1:8000/api/recommendations/snooze" in custom_posture["on-click-middle"]
 
     # 5. Validate systemd/posture-core.service directives
     unit_text = service_unit.read_text(encoding="utf-8")
@@ -703,8 +698,7 @@ async def test_desktop_notify_subprocess_dispatch_and_shell_safety(
         )
 
         captured = [
-            json.loads(line)
-            for line in capture_file.read_text(encoding="utf-8").splitlines()
+            json.loads(line) for line in capture_file.read_text(encoding="utf-8").splitlines()
         ]
         assert len(captured) == 3
 
