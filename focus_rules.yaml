@@ -153,17 +153,6 @@ work_title_patterns:
   - "DeepSeek"
   - "Phind"
 
-  # --- Common Domains & URLs (when URL-in-title browser add-on is active) ---
-  - "github.com"
-  - "gitlab.com"
-  - "perplexity.ai"
-  - "chatgpt.com"
-  - "claude.ai"
-  - "gemini.google.com"
-  - "overleaf.com"
-  - "arxiv.org"
-  - "stackoverflow.com"
-
   # --- Cloud Platforms & Dev Infrastructure ---
   - "Google Cloud"
   - "Google Auth Platform"

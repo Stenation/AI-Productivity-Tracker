@@ -811,11 +811,6 @@ _PLANNING_CORRELATION_REGEX: Pattern[str] = re.compile(
     r"(?i)\b(planning|plan|roadmap|backlog|sprint|jira|linear|trello|asana|board|prioritization|okr|review)\b"
 )
 
-_REPO_SLUG_REGEX: Pattern[str] = re.compile(
-    r"^[a-zA-Z0-9_\-\.]+\/[a-zA-Z0-9_\-\.]+(\s*[:—\-]|\s*$)"
-)
-
-
 
 class WindowClassificationResult(BaseModel):
     """Result of window focus classification (FR-08, FR-09)."""
@@ -1203,21 +1198,6 @@ def classify_window(
             for p in resolved_work_titles
             if str(p).strip()
         ):
-            return WindowClassificationResult(
-                category="focused",
-                classifier="title_rule",
-                is_call_window=call_detected,
-                confidence=0.90,
-            )
-
-        # Check for Git repository slug (owner/repo) in title
-        title_no_browser = re.sub(
-            r"\s*([—\-]\s*(Mozilla Firefox|Google Chrome|Chromium|Brave|Edge))\s*$",
-            "",
-            clean_title,
-            flags=re.IGNORECASE,
-        ).strip()
-        if _REPO_SLUG_REGEX.search(title_no_browser):
             return WindowClassificationResult(
                 category="focused",
                 classifier="title_rule",

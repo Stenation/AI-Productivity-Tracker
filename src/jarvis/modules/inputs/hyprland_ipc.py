@@ -736,12 +736,10 @@ class HyprlandIpcModule(BaseModule):
                 logger.warning("Custom window LLM classifier error: %s", exc)
         else:
             try:
-                model_name = self._get_config_value("llm_model") or self._get_config_value("text_model")
                 res = await classify_window_with_llm(
                     app_class=app_class,
                     window_title=window_title,
                     calendar_task_type=calendar_task_type,
-                    model=model_name,
                 )
             except Exception as exc:
                 logger.warning("classify_window_with_llm error: %s", exc)
@@ -750,14 +748,6 @@ class HyprlandIpcModule(BaseModule):
             cat = str(res["category"]).strip().lower()
             conf = float(res.get("confidence", 0.8))
             if cat in VALID_FOCUS_CATEGORIES and cat != "unknown":
-                logger.info(
-                    "LLM classified window %r / %r -> %s (confidence=%.2f, reason: %s)",
-                    app_class,
-                    window_title,
-                    cat,
-                    conf,
-                    res.get("reason", ""),
-                )
                 llm_result = WindowClassificationResult(
                     category=cat,  # type: ignore[arg-type]
                     classifier="llm",

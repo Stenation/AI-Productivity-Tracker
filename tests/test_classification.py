@@ -1348,23 +1348,6 @@ def test_tier1_firefox_websites_direct_classification() -> None:
     )
     assert res_yt.category == "distracted"
 
-    # Git repository slug without explicit "GitHub" token
-    res_slug = classify_window(
-        "firefox",
-        "Stenation/AI-Productivity-Tracker — Mozilla Firefox",
-        settings=rules_settings,
-    )
-    assert res_slug.category == "focused"
-    assert res_slug.classifier == "title_rule"
-
-    res_slug_desc = classify_window(
-        "firefox",
-        "Stenation/AI-Productivity-Tracker: Posture platform with AI",
-        settings=rules_settings,
-    )
-    assert res_slug_desc.category == "focused"
-
-
 
 def test_custom_rules_file_is_easily_replaceable(tmp_path: Any) -> None:
     """Verify users can provide a custom rules file without modifying source code."""
