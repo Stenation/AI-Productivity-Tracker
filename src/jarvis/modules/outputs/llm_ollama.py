@@ -116,6 +116,7 @@ class LlmOllamaModule(BaseModule):
         source: str = "dashboard",
         speak: bool = False,
         *,
+        language: str | None = None,
         context: dict[str, Any] | None = None,
         resolver: Any = None,
         timer_manager: Any = None,
@@ -139,7 +140,11 @@ class LlmOllamaModule(BaseModule):
 
         # 2. Invoke local LLM with error isolation
         try:
-            res = await self.client.ask(question=question, context=effective_context)
+            res = await self.client.ask(
+                question=question,
+                context=effective_context,
+                language=language,
+            )
         except (LlmConnectionError, LlmTimeoutError, LlmValidationError, LlmError) as exc:
             err_str = f"{type(exc).__name__}: {exc}"
             self._status = "degraded"
@@ -235,6 +240,7 @@ class LlmOllamaModule(BaseModule):
                     payload={
                         "text": res["answer"],
                         "interaction_id": interaction_id,
+                        "language": language,
                     },
                 )
             )

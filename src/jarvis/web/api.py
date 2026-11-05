@@ -1347,6 +1347,7 @@ async def ask_assistant(
             question=payload.question,
             source=payload.source,
             speak=payload.speak,
+            language=getattr(payload, "language", None),
             resolver=resolver,
             timer_manager=_get_timer_manager(request),
             settings=settings,
