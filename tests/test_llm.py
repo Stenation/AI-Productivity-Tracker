@@ -1298,3 +1298,10 @@ async def test_calendar_chat_prompt_guidelines_and_doctor_appointment(
 
     # 4. Context delivered to model contains doctor's appointment
     assert "Augenarzt" in sys_prompt
+
+    # 5. Spoken conversational delivery and natural time formatting
+    assert "Conversational voice assistant style" in sys_prompt
+    assert "Natural spoken time formatting" in sys_prompt
+    assert "NEVER use zero-padded digit times" in sys_prompt
+    assert "um 7 Uhr" in sys_prompt
+    assert "at 7 o'clock" in sys_prompt

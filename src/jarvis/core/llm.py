@@ -736,19 +736,6 @@ class OllamaClient:
             await self._client.aclose()
             self._client = None
 
-    async def list_models(self) -> list[str]:
-        """Query Ollama daemon for installed model names."""
-        client = await self._get_client()
-        url = f"{self.base_url}/api/tags"
-        try:
-            resp = await client.get(url)
-            if resp.status_code == 200:
-                data = resp.json()
-                return [str(m["name"]) for m in data.get("models", []) if "name" in m]
-        except Exception as exc:
-            logger.debug("Failed to list Ollama models: %s", exc)
-        return []
-
     async def chat(
         self,
         messages: list[dict[str, str]],
@@ -901,6 +888,21 @@ class OllamaClient:
             "'suggested_action' (e.g., 'start_timer', 'stand_up', 'take_break', or null). "
             "You must NEVER attempt to execute shell commands, directly change posture state, "
             "or modify settings.\n"
+            "Conversational voice assistant style:\n"
+            "- You speak directly to the user out loud as a personal voice assistant. Present answers in fluent,\n"
+            "  natural conversational sentences instead of robotic numbered lists, raw bullet points, or parenthetical\n"
+            "  database dumps (e.g. NEVER output '1. Aufstehen (07:00 – 07:15) - Coding').\n"
+            "- Group appointments smoothly by time of day (morning, afternoon, evening) and transition naturally between them.\n"
+            "Natural spoken time formatting (CRITICAL for text-to-speech):\n"
+            "- NEVER use zero-padded digit times (e.g. NEVER write '07:00', '08:00', or '07:15').\n"
+            "- In German:\n"
+            "  * For full hours write 'um 7 Uhr', 'um 8 Uhr', '14 Uhr' (NEVER '07:00' or '7:00 Uhr').\n"
+            "  * For time ranges write 'von 7 bis 8 Uhr' or 'von 7 Uhr bis 7:15 Uhr'.\n"
+            "  * For minutes write 'um 7:15 Uhr' (or '7 Uhr 15') and 'um 8:30 Uhr' (or 'halb neun').\n"
+            "- In English:\n"
+            "  * For full hours write 'at 7 o'clock', 'at 8 o'clock', 'at 2 PM' (NEVER '07:00' or '7:00').\n"
+            "  * For time ranges write 'from 7 to 8 o'clock' or 'from 7:00 to 7:15 AM'.\n"
+            "  * For minutes write 'at 7:15 AM' and 'at 8:30 AM'.\n"
             "Calendar guidelines:\n"
             "- Current time & upcoming appointments:\n"
             "  * The current local time is given in 'current_time'. Events with status 'past' have\n"
@@ -1077,45 +1079,22 @@ async def classify_window_with_llm(
 
     effective_model = model
     if effective_model is None and settings is not None:
-        effective_model = getattr(settings.focus, "llm_model", None) or getattr(
-            settings.llm, "text_model", None
-        )
+        effective_model = getattr(settings.focus, "llm_model", None)
+    if effective_model is None:
+        effective_model = "qwen2.5:0.5b"
 
-    effective_client = client or OllamaClient(model=effective_model or "qwen3:14b")
+    effective_client = client or OllamaClient(model=effective_model)
     own_client = client is None
 
-    # Check installed models if needed
-    try:
-        available = await effective_client.list_models()
-        if available:
-            if effective_model and effective_model not in available:
-                # Find best matching installed model or fallback to first
-                matched = next(
-                    (m for m in available if effective_model.split(":")[0] in m),
-                    available[0],
-                )
-                effective_model = matched
-            elif not effective_model:
-                effective_model = available[0]
-    except Exception:
-        pass
-    if not effective_model:
-        effective_model = "qwen3:14b"
-
-    cal_task_line = f"Current Calendar Task: {calendar_task_type}\n" if calendar_task_type else ""
-
     prompt = (
-        "Classify the following active desktop window into exactly one category from: "
-        "[focused, neutral, distracted].\n\n"
+        "Classify the following active window into exactly one category from: "
+        "[focused, neutral, distracted].\n"
         f"Application: {clean_app or 'Unknown'}\n"
         f"Window Title: {clean_title or 'None'}\n"
-        f"{cal_task_line}\n"
+        f"Current Calendar Task: {calendar_task_type or 'None'}\n\n"
         "Guidance:\n"
-        "- 'focused': Productive work, coding, programming, software repositories (e.g. user/repo on GitHub/GitLab), "
-        "bachelor thesis / academic research, writing, studying, debugging, technical docs, design, professional tools, "
-        "or querying AI / web assistants (like Perplexity, ChatGPT, Claude) for knowledge, technical or research questions.\n"
-        "- 'distracted': Social media browsing (Reddit, Twitter, Instagram, TikTok), entertaining video streaming (YouTube, Netflix, Twitch), "
-        "gaming, memes, casual entertainment.\n"
+        "- 'focused': Productive work, coding, bachelor thesis / academic research, writing, studying, debugging, technical docs, design, professional tools.\n"
+        "- 'distracted': Social media browsing, gaming, entertaining video streaming, casual reading, memes, entertainment.\n"
         "- 'neutral': System settings, file managers, calculators, calendar views, password managers, desktop utilities, email triage."
     )
 
@@ -1148,7 +1127,15 @@ async def classify_window_with_llm(
             }
         return None
     except Exception as exc:
-        logger.warning("classify_window_with_llm failed: %s", exc)
+        err_msg = str(exc)
+        if "not found" in err_msg.lower() or "404" in err_msg:
+            logger.warning(
+                "Ollama window classification model '%s' is not installed. Run 'ollama pull %s' to enable window LLM classification.",
+                effective_model,
+                effective_model,
+            )
+        else:
+            logger.warning("classify_window_with_llm failed: %s", exc)
         return None
     finally:
         if own_client:

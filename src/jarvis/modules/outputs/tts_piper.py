@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import shutil
 import uuid
 import wave
@@ -39,6 +40,105 @@ def is_german_text(text: str) -> bool:
     }
     words = {w.strip(".,!?:;\"'()[]{}").lower() for w in text.split()}
     return len(words & de_words) >= 2
+
+
+def clean_text_for_speech(text: str, is_german: bool = True) -> str:
+    """Prepare text for TTS by stripping robotic formatting and normalizing times for natural pronunciation."""
+    if not text:
+        return ""
+    cleaned = text
+    # Strip markdown headers (#, ##), bold, italic, code spans
+    cleaned = re.sub(r"#+\s*", "", cleaned)
+    cleaned = re.sub(r"[*_]{1,3}([^*_]+)[*_]{1,3}", r"\1", cleaned)
+    cleaned = re.sub(r"`([^`]+)`", r"\1", cleaned)
+
+    if is_german:
+        # 1. Time ranges with hours & minutes: e.g. 07:00 – 07:15, 7:00 - 8:00
+        def _range_de(m: re.Match[str]) -> str:
+            h1, m1, h2, m2 = int(m.group(1)), m.group(2), int(m.group(3)), m.group(4)
+            if m1 == "00" and m2 == "00":
+                return f"von {h1} bis {h2} Uhr"
+            t1 = f"{h1} Uhr" if m1 == "00" else f"{h1} Uhr {int(m1)}"
+            t2 = f"{h2} Uhr" if m2 == "00" else f"{h2} Uhr {int(m2)}"
+            return f"von {t1} bis {t2}"
+
+        cleaned = re.sub(
+            r"(?:von\s+)?\b0?([0-9]|1[0-9]|2[0-3]):([0-5][0-9])\s*[–\-—]\s*0?([0-9]|1[0-9]|2[0-3]):([0-5][0-9])\s*(?:uhr)?\b",
+            _range_de,
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        # 2. Single times with :00 (e.g. 07:00, 7:00, 07:00 Uhr -> 7 Uhr)
+        cleaned = re.sub(
+            r"\b0?([0-9]|1[0-9]|2[0-3]):00\s*(?:uhr)?\b",
+            lambda m: f"{int(m.group(1))} Uhr",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        # 3. Times with minutes followed by Uhr (e.g. 07:15 Uhr, 7:15 Uhr -> 7 Uhr 15)
+        # to prevent Piper/espeak pronouncing ':' as 'Uhr' and repeating 'Uhr' twice
+        cleaned = re.sub(
+            r"\b0?([0-9]|1[0-9]|2[0-3]):([0-5][0-9])\s*uhr\b",
+            lambda m: f"{int(m.group(1))} Uhr {int(m.group(2))}",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        # 4. Times with minutes without Uhr (e.g. 07:15 -> 7:15)
+        cleaned = re.sub(
+            r"\b0([0-9]):([0-5][0-9])\b",
+            r"\1:\2",
+            cleaned,
+        )
+    else:
+        # English
+        def _range_en(m: re.Match[str]) -> str:
+            h1, m1, h2, m2 = int(m.group(1)), m.group(2), int(m.group(3)), m.group(4)
+            if m1 == "00" and m2 == "00":
+                return f"from {h1} to {h2} o'clock"
+            t1 = f"{h1} o'clock" if m1 == "00" else f"{h1}:{m1}"
+            t2 = f"{h2} o'clock" if m2 == "00" else f"{h2}:{m2}"
+            return f"from {t1} to {t2}"
+
+        cleaned = re.sub(
+            r"(?:from\s+)?\b0?([1-9]|1[0-2]):([0-5][0-9])\s*[–\-—]\s*0?([1-9]|1[0-2]):([0-5][0-9])\b",
+            _range_en,
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(
+            r"\b0?([1-9]|1[0-2]):00\s*(am|pm)\b",
+            lambda m: f"{int(m.group(1))} {m.group(2).upper()}",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(
+            r"\b0?([1-9]|1[0-2]):00\b",
+            lambda m: f"{int(m.group(1))} o'clock",
+            cleaned,
+        )
+        cleaned = re.sub(
+            r"\b0([1-9]):([0-5][0-9])\b",
+            r"\1:\2",
+            cleaned,
+        )
+
+    # Clean list numbers / bullets at start of lines or between lines
+    cleaned = re.sub(r"^\s*\d+\.\s*", "", cleaned)
+    cleaned = re.sub(r"(?:(?<=[.!?])\s*|\n+)\s*\d+\.\s*", ". ", cleaned)
+    cleaned = re.sub(r"^\s*[-*•]\s*", "", cleaned, flags=re.MULTILINE)
+    # Remove standalone parentheses around details
+    cleaned = re.sub(r"\(([^\)]+)\)", r", \1,", cleaned)
+    # Clean dashes and punctuation repetitions
+    cleaned = re.sub(r"\s*[–—]\s*", r", ", cleaned)
+    cleaned = re.sub(r"[,;\s]*,", ",", cleaned)
+    cleaned = re.sub(r"[,;\s]*\.", ".", cleaned)
+    cleaned = re.sub(r"\.\s*\.", ".", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    cleaned = cleaned.lstrip(".,;: ")
+    cleaned = cleaned.rstrip(" ,;:-")
+    if text.strip().endswith(".") and not cleaned.endswith((".", "!", "?")):
+        cleaned += "."
+    return cleaned
 
 
 class TtsError(Exception):
@@ -512,6 +612,10 @@ class TtsPiperModule(BaseModule):
         lang = str(event.payload.get("language") or "").strip().lower()
         use_german = (lang.startswith("de")) or (not lang and is_german_text(text))
 
+        spoken_text = clean_text_for_speech(text, is_german=use_german)
+        if not spoken_text:
+            return
+
         synthesizer = (
             self._german_synthesizer
             if use_german and self._german_synthesizer is not None
@@ -519,7 +623,7 @@ class TtsPiperModule(BaseModule):
         )
 
         try:
-            await synthesizer.synthesize(text, temp_wav)
+            await synthesizer.synthesize(spoken_text, temp_wav)
             await self._player.play(temp_wav)
             self._last_error = None
         except Exception as exc:

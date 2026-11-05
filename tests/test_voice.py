@@ -682,3 +682,44 @@ async def test_tts_german_voice_routing(db: Database, tmp_path: Path) -> None:
         assert len(german_syn.synthesize_calls) == 2
     finally:
         await tts_mod.stop()
+
+
+def test_clean_text_for_speech_german_natural_times_and_markdown() -> None:
+    from jarvis.modules.outputs.tts_piper import clean_text_for_speech
+
+    # 1. Full hours: 07:00 -> 7 Uhr (prevents reading "null sieben null null")
+    assert clean_text_for_speech("Um 07:00 Uhr aufstehen.", is_german=True) == "Um 7 Uhr aufstehen."
+    assert clean_text_for_speech("Termin um 08:00.", is_german=True) == "Termin um 8 Uhr."
+
+    # 2. Time ranges: 07:00 – 07:15 -> von 7 Uhr bis 7 Uhr 15
+    res_range = clean_text_for_speech("Aufstehen (07:00 – 07:15)", is_german=True)
+    assert "von 7 Uhr bis 7 Uhr 15" in res_range
+
+    # 3. Minutes with Uhr: 7:15 Uhr -> 7 Uhr 15 (prevents piper repeating 'uhr' twice)
+    assert clean_text_for_speech("Treffen um 7:15 Uhr.", is_german=True) == "Treffen um 7 Uhr 15."
+
+    # 4. Robotic markdown list removal:
+    robotic_list = "1. **Aufstehen** (07:00 – 07:15) – Coding\n2. **Augenarzt** (08:30 – 09:30)"
+    cleaned = clean_text_for_speech(robotic_list, is_german=True)
+    assert "1." not in cleaned
+    assert "2." not in cleaned
+    assert "**" not in cleaned
+    assert "07:00" not in cleaned
+    assert "von 7 Uhr bis 7 Uhr 15" in cleaned
+    assert "von 8 Uhr 30 bis 9 Uhr 30" in cleaned
+
+
+def test_clean_text_for_speech_english_natural_times() -> None:
+    from jarvis.modules.outputs.tts_piper import clean_text_for_speech
+
+    # Full hours: 07:00 -> 7 o'clock (prevents reading "zero seven zero zero")
+    assert clean_text_for_speech("Meeting at 07:00.", is_german=False) == "Meeting at 7 o'clock."
+    assert clean_text_for_speech("Starts at 08:00 AM.", is_german=False) == "Starts at 8 AM."
+
+    # Time ranges: 07:00 – 08:00 -> from 7 to 8 o'clock
+    res_range = clean_text_for_speech("Doctor from 08:00 – 09:00", is_german=False)
+    assert "from 8 to 9 o'clock" in res_range
+
+    # Minutes: 07:15 -> 7:15 (removes leading zero)
+    assert clean_text_for_speech("Alarm at 07:15.", is_german=False) == "Alarm at 7:15."
+
