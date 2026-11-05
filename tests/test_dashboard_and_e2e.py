@@ -249,6 +249,7 @@ async def test_vertical_slice_milestone_1_e2e(tmp_path: Path) -> None:
                 assert "text/html" in dash_resp.headers["content-type"]
                 dash_html = dash_resp.text
                 assert "/static/htmx.min.js" in dash_html
+                assert "/static/app.js" in dash_html
                 assert "/static/styles.css" in dash_html
                 assert "https://" not in dash_html
                 assert "http://" not in dash_html
@@ -690,6 +691,176 @@ async def test_htmx_partials_and_hx_request_actions(tmp_path: Path) -> None:
                 assert mod_en_hx.status_code == 200
                 assert mod_en_hx.headers.get("HX-Trigger") == "modulesChanged"
                 assert "/api/modules/meeting_policy/disable" in mod_en_hx.text
+
+
+async def test_dashboard_refresh_non_interrupting_typing_and_selection(tmp_path: Path) -> None:
+    """Verify dashboard polling updates do not interrupt active inputs, forms, or text selection."""
+    import shutil
+    import subprocess
+
+    notify_bin, _ = _create_recording_notify_binary(tmp_path)
+    sock_path = tmp_path / "s2_non_interrupt.sock"
+
+    async with _fake_hyprland_server(sock_path):
+        settings, _ = _build_e2e_settings(
+            tmp_path,
+            notify_binary=notify_bin,
+            hyprland_socket=sock_path,
+        )
+        app = create_app(settings=settings)
+
+        async with app.router.lifespan_context(app):
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(
+                transport=transport,
+                base_url="http://127.0.0.1:8000",
+            ) as client:
+                dash_resp = await client.get("/")
+                assert dash_resp.status_code == 200
+                html = dash_resp.text
+
+                # 1. Base layout loads non-interrupt client controller
+                assert '<script src="/static/app.js" defer></script>' in html
+
+                # 2. Ask panel does NOT poll every 3s (which previously wiped out input & responses)
+                # Instead, it responds to explicit module/privacy change events
+                assert 'id="ask-panel"' in html
+                assert 'hx-trigger="modulesChanged from:body, privacyChanged from:body"' in html
+                assert 'every 3s, modulesChanged' not in html
+
+                # 3. Dynamic metric panels retain their periodic 3s polling
+                assert 'id="posture-panel"' in html
+                assert 'id="timer-panel"' in html
+                assert 'id="calendar-panel"' in html
+                assert 'id="recommendations-panel"' in html
+                assert 'hx-trigger="every 3s' in html
+
+                # 4. Ask partial form and response containers use hx-preserve when LLM is enabled
+                await client.post("/api/modules/llm_ollama/enable")
+                part_resp = await client.get("/partials/ask", headers={"HX-Request": "true"})
+                assert part_resp.status_code == 200
+                part_html = part_resp.text
+                assert 'id="ask-form"' in part_html
+                assert 'hx-preserve="true"' in part_html
+                assert 'id="ask-question-input"' in part_html
+                assert '<div id="ask-response" hx-preserve="true"' in part_html
+
+                # 5. Static app.js is served and contains non-interrupting logic
+                app_js_resp = await client.get("/static/app.js")
+                assert app_js_resp.status_code == 200
+                js_content = app_js_resp.text
+                assert "hasSelectionIntersecting" in js_content
+                assert "hasActiveInput" in js_content
+                assert "shouldBlockUpdate" in js_content
+                assert "htmx:beforeRequest" in js_content
+                assert "htmx:beforeSwap" in js_content
+
+                # 6. Verify JavaScript controller behavior if Node.js is present
+                node_bin = shutil.which("node")
+                if node_bin:
+                    node_script = """
+const fs = require('fs');
+const code = fs.readFileSync('src/jarvis/web/static/app.js', 'utf8');
+
+const listeners = {};
+const windowListeners = {};
+
+global.window = {
+  addEventListener(evt, cb) {
+    windowListeners[evt] = windowListeners[evt] || [];
+    windowListeners[evt].push(cb);
+  },
+  getSelection() { return global.mockSelection; }
+};
+
+global.document = {
+  activeElement: null,
+  addEventListener(evt, cb) {
+    listeners[evt] = listeners[evt] || [];
+    listeners[evt].push(cb);
+  },
+  getElementById(id) { return global.mockElements[id] || null; }
+};
+
+global.mockSelection = { isCollapsed: true, rangeCount: 0, toString: () => '' };
+global.mockElements = {};
+
+eval(code);
+
+// Test A: Idle state -> Polling request allowed
+let prevented = false;
+let fakeEvent = {
+  detail: {
+    target: { contains: () => false, querySelectorAll: () => [] },
+    elt: {},
+    requestConfig: {}
+  },
+  preventDefault() { prevented = true; }
+};
+listeners['htmx:beforeRequest'][0](fakeEvent);
+if (prevented) process.exit(1);
+
+// Test B: Active text selection -> Polling request blocked
+prevented = false;
+global.mockSelection = {
+  isCollapsed: false,
+  rangeCount: 1,
+  toString: () => 'Sitting for 45 minutes',
+  getRangeAt: () => ({ intersectsNode: () => true })
+};
+listeners['htmx:beforeRequest'][0](fakeEvent);
+if (!prevented) process.exit(2);
+
+// Test C: User click action while selection exists -> Allowed
+prevented = false;
+let clickEvent = {
+  detail: {
+    target: fakeEvent.detail.target,
+    elt: {},
+    requestConfig: { triggeringEvent: { type: 'click' } }
+  },
+  preventDefault() { prevented = true; }
+};
+listeners['htmx:beforeRequest'][0](clickEvent);
+if (prevented) process.exit(3);
+
+// Test D: Mouse down (dragging) -> Polling blocked
+global.mockSelection = { isCollapsed: true, rangeCount: 0, toString: () => '' };
+windowListeners['mousedown'][0]({ button: 0 });
+prevented = false;
+listeners['htmx:beforeRequest'][0](fakeEvent);
+if (!prevented) process.exit(4);
+
+windowListeners['mouseup'][0]();
+prevented = false;
+listeners['htmx:beforeRequest'][0](fakeEvent);
+if (prevented) process.exit(5);
+
+// Test E: Active focused input -> Polling blocked
+const mockInput = { tagName: 'INPUT', type: 'text', value: 'Draft question' };
+document.activeElement = mockInput;
+const mockTarget = { contains: (el) => el === mockInput, querySelectorAll: () => [mockInput] };
+let inputEvent = {
+  detail: { target: mockTarget, elt: mockTarget, requestConfig: {} },
+  preventDefault() { prevented = true; }
+};
+prevented = false;
+listeners['htmx:beforeRequest'][0](inputEvent);
+if (!prevented) process.exit(6);
+
+// Test F: beforeSwap shouldSwap set to false
+let swapEvent = {
+  detail: { target: mockTarget, elt: mockTarget, requestConfig: {}, shouldSwap: true },
+  preventDefault() { prevented = true; }
+};
+listeners['htmx:beforeSwap'][0](swapEvent);
+if (!prevented || swapEvent.detail.shouldSwap !== false) process.exit(7);
+
+process.exit(0);
+"""
+                    res = subprocess.run([node_bin, "-e", node_script], capture_output=True, text=True)
+                    assert res.returncode == 0, f"Node controller test failed: {res.stderr}"
+
 
 
 # ==============================================================================

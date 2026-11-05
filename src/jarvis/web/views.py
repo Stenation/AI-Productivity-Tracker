@@ -28,6 +28,8 @@ STATIC_DIR = WEB_DIR / "static"
 MODULES_ROOT_DIR = WEB_DIR.parent / "modules"
 
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+templates.env.auto_reload = True
+templates.env.cache = None
 
 _PRESET_RE = re.compile(r"^(\d+)_(\d+)$")
 _CATEGORY_ORDER: dict[str, int] = {"inputs": 0, "policies": 1, "outputs": 2}

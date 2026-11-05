@@ -16,12 +16,15 @@
 </div>
 
 {% if ask.llm_enabled %}
-  <form hx-post="/api/ask"
+  <form id="ask-form"
+        hx-preserve="true"
+        hx-post="/api/ask"
         hx-target="#ask-response"
         hx-swap="innerHTML"
         class="ask-form">
     <div class="input-group">
       <input type="text"
+             id="ask-question-input"
              name="question"
              placeholder="Ask assistant about your posture, focus, or schedule..."
              required
@@ -37,7 +40,7 @@
     </div>
   </form>
 
-  <div id="ask-response" class="mt-2"></div>
+  <div id="ask-response" hx-preserve="true" class="mt-2"></div>
 {% else %}
   <div class="empty-state">
     Local LLM Assistant is currently disabled.

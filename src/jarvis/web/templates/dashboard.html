@@ -36,7 +36,7 @@
   <section id="ask-panel"
            class="card col-6"
            hx-get="/partials/ask"
-           hx-trigger="every 3s, modulesChanged from:body, privacyChanged from:body"
+           hx-trigger="modulesChanged from:body, privacyChanged from:body"
            hx-swap="innerHTML">
     {% include "_partials/ask_card.html" %}
   </section>
