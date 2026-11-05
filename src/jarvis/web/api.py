@@ -462,11 +462,7 @@ async def get_state(request: Request) -> dict[str, Any]:
     dnd_mode = bool(settings.privacy.dnd_mode)
 
     focus_mod = registry.get_module("focus_policy")
-    if (
-        focus_mod is not None
-        and hasattr(focus_mod, "get_focus_summary")
-        and not privacy_paused
-    ):
+    if focus_mod is not None and hasattr(focus_mod, "get_focus_summary") and not privacy_paused:
         focus_summary = await focus_mod.get_focus_summary(now=now)
         focus_state = focus_summary.get("focus_state", "unknown")
         app_class = focus_summary.get("app_class")
@@ -484,6 +480,7 @@ async def get_state(request: Request) -> dict[str, Any]:
             is_call = bool(meta["is_call_window"])
         else:
             from jarvis.core.classification import is_call_window
+
             is_call = is_call_window(app_class or "", window_title or "")
 
     current_window_payload = (
@@ -514,8 +511,7 @@ async def get_state(request: Request) -> dict[str, Any]:
 
     pending_rows = await db.get_pending_recommendations()
     pending_recommendations = [
-        Recommendation.model_validate(row).model_dump(mode="json")
-        for row in pending_rows
+        Recommendation.model_validate(row).model_dump(mode="json") for row in pending_rows
     ]
 
     return {
@@ -699,10 +695,7 @@ async def list_recommendations(request: Request) -> dict[str, Any]:
     """List pending non-destructive policy recommendations."""
     db = _get_db(request)
     rows = await db.get_pending_recommendations()
-    items = [
-        Recommendation.model_validate(row).model_dump(mode="json")
-        for row in rows
-    ]
+    items = [Recommendation.model_validate(row).model_dump(mode="json") for row in rows]
     return {
         "recommendations": items,
         "count": len(items),
@@ -937,9 +930,7 @@ async def get_activity_history(
         span_model = ActivitySpan.model_validate(row)
         end_dt = span_model.ended_at if span_model.ended_at is not None else now
         duration = max(0, int((end_dt - span_model.started_at).total_seconds()))
-        totals_seconds[span_model.activity] = (
-            totals_seconds.get(span_model.activity, 0) + duration
-        )
+        totals_seconds[span_model.activity] = totals_seconds.get(span_model.activity, 0) + duration
         serialized.append(span_model.model_dump(mode="json"))
 
     return {
@@ -965,9 +956,7 @@ async def get_window_history(
         started_dt = ensure_aware(datetime.fromisoformat(str(row["started_at"])))
         ended_raw = row.get("ended_at")
         end_dt = (
-            ensure_aware(datetime.fromisoformat(str(ended_raw)))
-            if ended_raw is not None
-            else now
+            ensure_aware(datetime.fromisoformat(str(ended_raw))) if ended_raw is not None else now
         )
         duration = max(0, int((end_dt - started_dt).total_seconds()))
         category = str(row.get("category", "unknown"))
@@ -986,9 +975,7 @@ async def list_modules(request: Request) -> dict[str, Any]:
     registry = _get_registry(request)
     db = _get_db(request)
 
-    db_health_by_name = {
-        str(row["module"]): row for row in await db.list_module_health()
-    }
+    db_health_by_name = {str(row["module"]): row for row in await db.list_module_health()}
     merged: list[dict[str, Any]] = []
     seen: set[str] = set()
 
@@ -1255,6 +1242,7 @@ async def update_llm_settings(
     llm_mod = registry.get_module("llm_ollama")
     if llm_mod is not None:
         from contextlib import suppress
+
         with suppress(Exception):
             await llm_mod.reload_config(settings.model_dump())
 
@@ -1362,6 +1350,7 @@ async def ask_assistant(
             resolver=resolver,
             timer_manager=_get_timer_manager(request),
             settings=settings,
+            registry=registry,
         )
     except LlmValidationError as exc:
         msg = f"Invalid model response: {exc}"
@@ -1423,7 +1412,7 @@ async def ask_assistant(
         meta_str = f"Model: {result['model']}{latency_str} | Confidence: {conf_str}"
         html = (
             f"""<div class="assistant-response card p-3 mb-2">\n"""
-            f"""  <div class="answer">{result['answer']}</div>\n"""
+            f"""  <div class="answer">{result["answer"]}</div>\n"""
             f"""  {action_html}\n"""
             f"""  <div class="meta text-muted small mt-2">{meta_str}</div>\n"""
             f"""</div>"""

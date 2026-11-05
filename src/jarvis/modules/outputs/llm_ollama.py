@@ -120,6 +120,7 @@ class LlmOllamaModule(BaseModule):
         resolver: Any = None,
         timer_manager: Any = None,
         settings: Settings | None = None,
+        registry: Any = None,
     ) -> dict[str, Any]:
         """Ask a question, persist successful interaction, emit events, and return result."""
         if not self._running:
@@ -133,6 +134,7 @@ class LlmOllamaModule(BaseModule):
                 resolver=resolver,
                 timer_manager=timer_manager,
                 settings=settings,
+                registry=registry,
             )
 
         # 2. Invoke local LLM with error isolation

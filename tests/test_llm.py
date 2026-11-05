@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+from datetime import time as dt_time
 from typing import Any
 
 import httpx
@@ -40,14 +41,17 @@ def make_fake_ollama_transport(
     capture_requests: list[dict[str, Any]] | None = None,
 ) -> httpx.MockTransport:
     """Create an injectable httpx.MockTransport simulating Ollama's /api/chat."""
+
     def handler(request: httpx.Request) -> httpx.Response:
         if capture_requests is not None:
             body = json.loads(request.content.decode("utf-8")) if request.content else {}
-            capture_requests.append({
-                "url": str(request.url),
-                "method": request.method,
-                "body": body,
-            })
+            capture_requests.append(
+                {
+                    "url": str(request.url),
+                    "method": request.method,
+                    "body": body,
+                }
+            )
 
         if side_effect is not None:
             raise side_effect
@@ -57,11 +61,13 @@ def make_fake_ollama_transport(
         elif response_content is not None:
             content_str = response_content
         else:
-            content_str = json.dumps({
-                "answer": "You have been sitting for 45 minutes. Time to stand up.",
-                "suggested_action": "stand_up",
-                "confidence": 0.95,
-            })
+            content_str = json.dumps(
+                {
+                    "answer": "You have been sitting for 45 minutes. Time to stand up.",
+                    "suggested_action": "stand_up",
+                    "confidence": 0.95,
+                }
+            )
 
         resp_payload = {
             "model": model,
@@ -419,18 +425,15 @@ async def test_keep_alive_and_think_false_payload() -> None:
 def test_clean_think_tags_variations() -> None:
     """Verify clean_think_tags removes thinking tokens, markdown fences, and unclosed tags."""
     # Standard closed <think> tag
-    raw1 = (
-        "<think>\nConsidering user activity...\n</think>\n"
-        '{"answer": "Hello", "confidence": 1.0}'
-    )
+    raw1 = '<think>\nConsidering user activity...\n</think>\n{"answer": "Hello", "confidence": 1.0}'
     assert clean_think_tags(raw1) == '{"answer": "Hello", "confidence": 1.0}'
 
     # Case-insensitive tag with internal line breaks
-    raw2 = "<THINK>pondering</THINK>{\"answer\": \"Done\"}"
+    raw2 = '<THINK>pondering</THINK>{"answer": "Done"}'
     assert clean_think_tags(raw2) == '{"answer": "Done"}'
 
     # Markdown json fence
-    raw3 = "```json\n{\"answer\": \"Inside code fence\"}\n```"
+    raw3 = '```json\n{"answer": "Inside code fence"}\n```'
     assert clean_think_tags(raw3) == '{"answer": "Inside code fence"}'
 
     # Unclosed think tag
@@ -462,9 +465,7 @@ async def test_ollama_client_strips_think_tags_defensively() -> None:
 def test_validate_llm_response_schema_rules() -> None:
     """Verify strict validation of LLM response dictionaries."""
     # Valid
-    val = validate_llm_response(
-        {"answer": "Good", "suggested_action": "walk", "confidence": 0.8}
-    )
+    val = validate_llm_response({"answer": "Good", "suggested_action": "walk", "confidence": 0.8})
     assert val["answer"] == "Good"
     assert val["confidence"] == 0.8
 
@@ -828,3 +829,160 @@ async def test_llm_safety_boundary_cannot_mutate_state(
     curr_span = await db.get_current_activity_span()
     assert curr_span is not None
     assert curr_span["activity"] == "sitting"
+
+
+# ---------------------------------------------------------------------------
+# 14. Calendar -> Assistant Chat End-to-End Regression Tests
+# ---------------------------------------------------------------------------
+
+
+async def test_calendar_to_chat_disabled_state(
+    llm_test_env: tuple[FastAPI, httpx.AsyncClient, list[dict[str, Any]]],
+) -> None:
+    """Verify disabled calendar produces unavailable status and never claims 'no appointments'."""
+    app, client, captured = llm_test_env
+    captured.clear()
+
+    # Ensure google_calendar is NOT enabled
+    assert app.state.registry.is_enabled("google_calendar") is False
+
+    resp = await client.post("/api/ask", json={"question": "What appointments do I have today?"})
+    assert resp.status_code == 200
+    assert len(captured) == 1
+
+    messages = captured[0]["body"]["messages"]
+    sys_prompt = messages[0]["content"]
+    assert "Calendar guidelines" in sys_prompt
+    assert '"status": "disabled"' in sys_prompt
+    assert '"available": false' in sys_prompt
+    assert "Calendar integration is disabled in settings." in sys_prompt
+    # Never leaks credentials or tokens
+    assert "token" not in sys_prompt.lower() or "google-token.json" not in sys_prompt
+
+
+async def test_calendar_to_chat_auth_and_fetch_failure_states(
+    db: Database,
+) -> None:
+    """Verify auth failures and network fetch failures are cleanly distinguished and safe."""
+    # 1. Not authenticated: token missing / OAuth failure
+    await db.upsert_module_health(
+        module="google_calendar",
+        status="degraded",
+        last_error="FileNotFoundError: OAuth token file not found at: /path/secret-token.json",
+    )
+    ctx_auth = await build_assistant_context(db=db)
+    cal_auth = ctx_auth["calendar"]
+    assert cal_auth["status"] == "not_authenticated"
+    assert cal_auth["available"] is False
+    assert "secret-token.json" not in json.dumps(cal_auth)  # credentials sanitized
+    assert "authentication failed" in cal_auth["message"].lower()
+
+    # 2. Fetch failed: connection error
+    await db.upsert_module_health(
+        module="google_calendar",
+        status="degraded",
+        last_error="ConnectTimeout: Google API timed out",
+    )
+    ctx_fetch = await build_assistant_context(db=db)
+    cal_fetch = ctx_fetch["calendar"]
+    assert cal_fetch["status"] == "fetch_failed"
+    assert cal_fetch["available"] is False
+    assert "fetch failed" in cal_fetch["message"].lower()
+
+
+async def test_calendar_to_chat_not_fetched_yet_state(
+    db: Database,
+) -> None:
+    """Verify enabled calendar with no initial sync is marked not_fetched_yet."""
+    # Healthy record but last_event_at is None and cache is empty
+    await db.upsert_module_health(
+        module="google_calendar",
+        status="ok",
+        last_event_at=None,
+        last_error=None,
+    )
+    ctx = await build_assistant_context(db=db)
+    cal = ctx["calendar"]
+    assert cal["status"] == "not_fetched_yet"
+    assert cal["available"] is False
+    assert "not been fetched yet" in cal["message"].lower()
+
+
+async def test_calendar_to_chat_empty_and_populated_events(
+    db: Database,
+) -> None:
+    """Verify empty day vs populated appointments in user's local timezone."""
+    now = datetime.now().astimezone()
+    today = now.date()
+
+    # 1. Mark module synced with no events
+    await db.upsert_module_health(
+        module="google_calendar",
+        status="ok",
+        last_event_at=now,
+        last_error=None,
+    )
+    ctx_empty = await build_assistant_context(db=db)
+    cal_empty = ctx_empty["calendar"]
+    assert cal_empty["status"] == "no_events"
+    assert cal_empty["available"] is True
+    assert cal_empty["events_today"] == []
+    assert "No calendar appointments scheduled for today" in cal_empty["message"]
+
+    # 2. Add multiple events: earlier today, ongoing, later today, and tomorrow
+    t_earlier_start = datetime.combine(today, dt_time(8, 30), tzinfo=now.tzinfo)
+    t_earlier_end = datetime.combine(today, dt_time(9, 30), tzinfo=now.tzinfo)
+
+    t_noon_start = datetime.combine(today, dt_time(12, 0), tzinfo=now.tzinfo)
+    t_noon_end = datetime.combine(today, dt_time(13, 0), tzinfo=now.tzinfo)
+
+    t_evening_start = datetime.combine(today, dt_time(19, 0), tzinfo=now.tzinfo)
+    t_evening_end = datetime.combine(today, dt_time(20, 30), tzinfo=now.tzinfo)
+
+    tomorrow = today + timedelta(days=1)
+    t_tomorrow_start = datetime.combine(tomorrow, dt_time(9, 0), tzinfo=now.tzinfo)
+    t_tomorrow_end = datetime.combine(tomorrow, dt_time(10, 0), tzinfo=now.tzinfo)
+
+    await db.upsert_calendar_event(
+        event_id="evt_early",
+        title="Morning Sync",
+        start_time=t_earlier_start,
+        end_time=t_earlier_end,
+        task_type="meeting",
+    )
+    await db.upsert_calendar_event(
+        event_id="evt_noon",
+        title="Architecture Discussion",
+        start_time=t_noon_start,
+        end_time=t_noon_end,
+        task_type="deep_work",
+    )
+    await db.upsert_calendar_event(
+        event_id="evt_eve",
+        title="Evening Workout",
+        start_time=t_evening_start,
+        end_time=t_evening_end,
+        task_type="break",
+    )
+    await db.upsert_calendar_event(
+        event_id="evt_tomorrow",
+        title="Tomorrow Standup",
+        start_time=t_tomorrow_start,
+        end_time=t_tomorrow_end,
+        task_type="meeting",
+    )
+
+    ctx_populated = await build_assistant_context(db=db)
+    cal_pop = ctx_populated["calendar"]
+    assert cal_pop["status"] == "events_found"
+    assert cal_pop["available"] is True
+    assert len(cal_pop["events_today"]) == 3
+
+    titles = [e["title"] for e in cal_pop["events_today"]]
+    assert titles == ["Morning Sync", "Architecture Discussion", "Evening Workout"]
+    assert "Tomorrow Standup" not in titles
+
+    # Time windows formatted in HH:MM
+    assert cal_pop["events_today"][0]["time_window"] == "08:30 – 09:30"
+    assert cal_pop["events_today"][1]["time_window"] == "12:00 – 13:00"
+    assert cal_pop["events_today"][2]["time_window"] == "19:00 – 20:30"

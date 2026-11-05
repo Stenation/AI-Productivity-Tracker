@@ -17,9 +17,7 @@ from jarvis.modules.base import BaseModule
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_VOICE_MODEL_PATH = Path(
-    "~/.local/share/posture-platform/voices/en_US-lessac-medium.onnx"
-)
+DEFAULT_VOICE_MODEL_PATH = Path("~/.local/share/posture-platform/voices/en_US-lessac-medium.onnx")
 DEFAULT_PLAYER_BINARY = "pw-play"
 DEFAULT_TEMP_DIR = Path("/dev/shm")
 
@@ -116,9 +114,7 @@ class PiperPythonSynthesizer:
 
         try:
             cfg_path_str = str(self.config_path) if self.config_path else None
-            self._voice = piper_voice_cls.load(
-                str(self.model_path), config_path=cfg_path_str
-            )
+            self._voice = piper_voice_cls.load(str(self.model_path), config_path=cfg_path_str)
             return self._voice
         except Exception as exc:
             raise TtsError(f"Failed to load Piper voice model: {exc}") from exc
@@ -139,6 +135,23 @@ class PiperPythonSynthesizer:
 
         def _sync_synthesize() -> None:
             with wave.open(str(output_wav), "wb") as wav_file:
+                # piper-tts >= 1.3: `synthesize_wav` sets the WAV format itself, while
+                # `synthesize` now returns audio chunks instead of writing a WAV file.
+                if hasattr(voice, "synthesize_wav"):
+                    syn_config: Any = None
+                    if self.speaker_id is not None or self.length_scale != 1.0:
+                        from piper.config import (  # type: ignore[import-not-found]
+                            SynthesisConfig,
+                        )
+
+                        syn_config = SynthesisConfig(
+                            speaker_id=self.speaker_id,
+                            length_scale=self.length_scale,
+                        )
+                    voice.synthesize_wav(text, wav_file, syn_config=syn_config)
+                    return
+
+                # Legacy piper-tts < 1.3 API: synthesize(text, wav_file, **kwargs)
                 kwargs: dict[str, Any] = {}
                 if self.speaker_id is not None:
                     kwargs["speaker_id"] = self.speaker_id
@@ -295,9 +308,7 @@ class PipeWirePlayer:
             _, stderr = await proc.communicate()
             if proc.returncode != 0:
                 err_msg = stderr.decode("utf-8", errors="replace").strip()
-                raise AudioPlaybackError(
-                    f"pw-play failed with code {proc.returncode}: {err_msg}"
-                )
+                raise AudioPlaybackError(f"pw-play failed with code {proc.returncode}: {err_msg}")
         except FileNotFoundError as exc:
             raise AudioPlaybackError(f"Audio player '{self.binary}' not found") from exc
         except Exception as exc:
@@ -341,15 +352,10 @@ class TtsPiperModule(BaseModule):
             or DEFAULT_PLAYER_BINARY
         )
         speaker_id = self.config.get("speaker_id") or tts_cfg.get("speaker_id")
-        length_scale = float(
-            self.config.get("length_scale") or tts_cfg.get("length_scale") or 1.0
-        )
+        length_scale = float(self.config.get("length_scale") or tts_cfg.get("length_scale") or 1.0)
 
         temp_dir_raw = (
-            temp_dir
-            or self.config.get("temp_dir")
-            or tts_cfg.get("temp_dir")
-            or DEFAULT_TEMP_DIR
+            temp_dir or self.config.get("temp_dir") or tts_cfg.get("temp_dir") or DEFAULT_TEMP_DIR
         )
         self._temp_dir = Path(str(temp_dir_raw)).expanduser()
 
@@ -372,9 +378,7 @@ class TtsPiperModule(BaseModule):
         self._global_pause: bool = bool(
             self.config.get("global_pause", privacy_cfg.get("global_pause", False))
         )
-        self._dnd_mode: bool = bool(
-            self.config.get("dnd_mode", privacy_cfg.get("dnd_mode", False))
-        )
+        self._dnd_mode: bool = bool(self.config.get("dnd_mode", privacy_cfg.get("dnd_mode", False)))
 
         self._running: bool = False
         self._last_error: str | None = None
@@ -507,4 +511,3 @@ class TtsPiperModule(BaseModule):
                 },
             )
         )
-

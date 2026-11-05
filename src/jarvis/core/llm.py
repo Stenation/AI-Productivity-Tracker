@@ -6,7 +6,8 @@ import json
 import logging
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
+from datetime import time as dt_time
 from typing import Any
 
 from jarvis.core.database import Database
@@ -149,13 +150,14 @@ async def build_assistant_context(
     resolver: Any | None = None,
     timer_manager: Any | None = None,
     settings: Settings | None = None,
+    registry: Any | None = None,
 ) -> dict[str, Any]:
     """Build a compact, privacy-safe JSON snapshot of platform state.
 
     Contains:
     - current activity, source, and elapsed duration
     - active desktop countdown timer status: kind, phase, remaining
-    - current and next calendar event: title, task_type, start_time, end_time, suitable_for_walking
+    - calendar state: status, availability, today's appointments, and current/next events
     - recent window categories and duration totals (never sensitive raw window titles)
     - pending recommendations
     """
@@ -216,21 +218,140 @@ async def build_assistant_context(
                 "remaining_seconds": 0,
             }
 
-    # 3. Calendar: current and next events
-    cur_row, next_row = await db.get_current_and_next_events(now=now)
+    # 3. Calendar: status, today's appointments, and current/next events
+    cal_enabled = False
+    if registry is not None:
+        cal_enabled = bool(registry.is_enabled("google_calendar"))
+    else:
+        persisted = await db.get_setting("module.google_calendar.enabled")
+        if persisted is not None:
+            cal_enabled = bool(persisted)
+        elif settings is not None:
+            inputs_enabled = getattr(settings.enabled_modules, "inputs", [])
+            cal_enabled = "google_calendar" in inputs_enabled
+        else:
+            health_check = await db.get_module_health("google_calendar")
+            if health_check is not None:
+                cal_enabled = health_check.get("status") != "disabled"
+            else:
+                cached_any = await db.list_calendar_events()
+                cal_enabled = bool(cached_any)
 
     def _format_event(row: dict[str, Any] | None) -> dict[str, Any] | None:
         if row is None:
             return None
+        st_raw = str(row.get("start_time", ""))
+        et_raw = str(row.get("end_time", ""))
+        time_window = ""
+        try:
+            s_dt = ensure_aware(datetime.fromisoformat(st_raw))
+            e_dt = ensure_aware(datetime.fromisoformat(et_raw))
+            time_window = f"{s_dt.strftime('%H:%M')} – {e_dt.strftime('%H:%M')}"
+        except Exception:
+            time_window = f"{st_raw} – {et_raw}"
         return {
             "title": row.get("title", ""),
             "task_type": row.get("task_type", "unknown"),
-            "start_time": str(row.get("start_time", "")),
-            "end_time": str(row.get("end_time", "")),
+            "start_time": st_raw,
+            "end_time": et_raw,
+            "time_window": time_window,
             "suitable_for_walking": row.get("suitable_for_walking"),
         }
 
+    cur_row = None
+    next_row = None
+    events_today: list[dict[str, Any]] = []
+
+    if not cal_enabled:
+        calendar_status = "disabled"
+        calendar_available = False
+        calendar_message = (
+            "Calendar integration is disabled in settings. Calendar data is unavailable."
+        )
+    else:
+        health_row = await db.get_module_health("google_calendar")
+        cal_instance = registry.get_module("google_calendar") if registry is not None else None
+        registry_status = registry.get_status("google_calendar") if registry is not None else None
+        effective_status = registry_status or (health_row.get("status") if health_row else None)
+        last_error = (health_row.get("last_error") if health_row else None) or (
+            getattr(cal_instance, "_last_error", None) if cal_instance is not None else None
+        )
+
+        if effective_status == "degraded" or last_error:
+            err_lower = (last_error or "").lower()
+            if any(
+                kw in err_lower
+                for kw in ("oauth", "auth", "token", "credential", "permission", "filenotfound")
+            ):
+                calendar_status = "not_authenticated"
+                calendar_available = False
+                calendar_message = (
+                    "Google Calendar authentication failed or token is missing/expired. "
+                    "Calendar data is unavailable."
+                )
+            else:
+                calendar_status = "fetch_failed"
+                calendar_available = False
+                calendar_message = (
+                    "Google Calendar event fetch failed. Calendar data is unavailable."
+                )
+        else:
+            has_synced = False
+            if (
+                cal_instance is not None
+                and getattr(cal_instance, "_last_sync_at", None) is not None
+            ):
+                has_synced = True
+            elif (
+                health_row is not None
+                and health_row.get("last_event_at") is not None
+                and health_row.get("status") == "ok"
+            ):
+                has_synced = True
+            else:
+                cached_all = await db.list_calendar_events()
+                if cached_all:
+                    has_synced = True
+
+            if not has_synced:
+                calendar_status = "not_fetched_yet"
+                calendar_available = False
+                calendar_message = (
+                    "Calendar events have not been fetched yet or are temporarily unavailable."
+                )
+            else:
+                start_of_today = datetime.combine(now.date(), dt_time.min, tzinfo=now.tzinfo)
+                end_of_today = datetime.combine(
+                    now.date() + timedelta(days=1), dt_time.min, tzinfo=now.tzinfo
+                )
+                cal_id = (
+                    settings.google_calendar.calendar_id
+                    if settings is not None and hasattr(settings, "google_calendar")
+                    else None
+                )
+                today_rows = await db.list_calendar_events(
+                    time_min=start_of_today,
+                    time_max=end_of_today,
+                    calendar_id=cal_id,
+                )
+                cur_row, next_row = await db.get_current_and_next_events(now=now)
+                events_today = [_format_event(r) for r in today_rows if r is not None]
+
+                if not events_today:
+                    calendar_status = "no_events"
+                    calendar_available = True
+                    calendar_message = "No calendar appointments scheduled for today."
+                else:
+                    calendar_status = "events_found"
+                    calendar_available = True
+                    calendar_message = f"{len(events_today)} appointment(s) scheduled for today."
+
     calendar_data = {
+        "status": calendar_status,
+        "available": calendar_available,
+        "message": calendar_message,
+        "date": now.date().isoformat(),
+        "events_today": events_today,
         "current_event": _format_event(cur_row),
         "next_event": _format_event(next_row),
     }
@@ -363,9 +484,7 @@ class OllamaClient:
         latency_ms = int((time.perf_counter() - start_t) * 1000)
 
         if resp.status_code != 200:
-            raise LlmError(
-                f"Ollama returned HTTP status {resp.status_code}: {resp.text[:200]}"
-            )
+            raise LlmError(f"Ollama returned HTTP status {resp.status_code}: {resp.text[:200]}")
 
         try:
             resp_data = resp.json()
@@ -416,6 +535,16 @@ class OllamaClient:
             "'suggested_action' (e.g., 'start_timer', 'stand_up', 'take_break', or null). "
             "You must NEVER attempt to execute shell commands, directly change posture state, "
             "or modify settings.\n"
+            "Calendar guidelines:\n"
+            "- When calendar 'available' is false (e.g. status is disabled, not_authenticated,\n"
+            "  fetch_failed, or not_fetched_yet), clearly state that calendar information is\n"
+            "  unavailable or disabled and reference the reason given in the context.\n"
+            "  NEVER claim or imply that the user has no appointments when calendar data\n"
+            "  is unavailable.\n"
+            "- When calendar 'status' is 'no_events' (available is true), inform the user that\n"
+            "  they have no appointments scheduled for today.\n"
+            "- When calendar 'status' is 'events_found' (available is true), answer using\n"
+            "  'events_today', which contains all scheduled appointments for today.\n"
             f"Current platform context:\n{ctx_str}"
         )
 

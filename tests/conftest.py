@@ -110,3 +110,7 @@ async def db(test_settings: Settings) -> AsyncIterator[Database]:
         yield database
     finally:
         await database.close()
+
+
+calendar_db = db
+
