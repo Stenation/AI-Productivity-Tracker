@@ -605,3 +605,71 @@ async def test_app_lifespan_pruning_and_persisted_settings(
         assert app.state.registry.is_enabled("manual_control") is True
 
 
+async def test_activity_span_under_30s_discarded_and_resumes_previous(
+    db: Database,
+) -> None:
+    t0 = datetime(2026, 11, 3, 10, 0, 0).astimezone()
+
+    # 1. User sits for 30 minutes (t0 to t0 + 30m)
+    s1 = await db.open_activity_span("sitting", "manual_control", started_at=t0)
+    assert s1["activity"] == "sitting"
+    assert s1["started_at"] == t0.isoformat()
+
+    # 2. At 30m, accidentally cycles to standing
+    t1 = t0 + timedelta(minutes=30)
+    s2 = await db.open_activity_span("standing", "manual_control", started_at=t1)
+    assert s2["activity"] == "standing"
+
+    # Sitting span was >= 30s (30m), so it was saved with ended_at
+    spans = await db.list_activity_spans()
+    assert len(spans) == 2
+    assert spans[0]["activity"] == "standing" and spans[0]["ended_at"] is None
+    assert spans[1]["activity"] == "sitting" and spans[1]["ended_at"] == t1.isoformat()
+
+    # 3. 5 seconds later, cycles to walking (standing lasted 5s < 30s)
+    t2 = t1 + timedelta(seconds=5)
+    s3 = await db.open_activity_span("walking", "manual_control", started_at=t2)
+    # Standing was < 30s, so it was deleted and NOT saved
+    spans = await db.list_activity_spans()
+    assert len(spans) == 2
+    assert spans[0]["activity"] == "walking" and spans[0]["ended_at"] is None
+    assert spans[1]["activity"] == "sitting"
+
+    # 4. 5 seconds later, cycles to away (walking lasted 5s < 30s)
+    t3 = t2 + timedelta(seconds=5)
+    s4 = await db.open_activity_span("away", "manual_control", started_at=t3)
+    spans = await db.list_activity_spans()
+    assert len(spans) == 2
+    assert spans[0]["activity"] == "away" and spans[0]["ended_at"] is None
+    assert spans[1]["activity"] == "sitting"
+
+    # 5. 5 seconds later, cycles back to sitting (away lasted 5s < 30s)
+    # Sitting was the previous valid span, ended 15 seconds ago -> RESUMES s1!
+    t4 = t3 + timedelta(seconds=5)
+    s5 = await db.open_activity_span("sitting", "manual_control", started_at=t4)
+    assert s5["id"] == s1["id"]
+    assert s5["started_at"] == t0.isoformat()
+    assert s5["ended_at"] is None
+
+    # Only 1 span in DB now: the resumed sitting span starting from t0
+    spans = await db.list_activity_spans()
+    assert len(spans) == 1
+    assert spans[0]["id"] == s1["id"]
+    assert spans[0]["activity"] == "sitting"
+    assert spans[0]["started_at"] == t0.isoformat()
+    assert spans[0]["ended_at"] is None
+
+    # 6. If user now switches to standing and stays for 45s (>= 30s), it IS saved
+    t5 = t4 + timedelta(minutes=10)
+    s6 = await db.open_activity_span("standing", "manual_control", started_at=t5)
+    t6 = t5 + timedelta(seconds=45)
+    s7 = await db.open_activity_span("sitting", "manual_control", started_at=t6)
+    # Standing was 45s >= 30s, so it was saved, and sitting starts a NEW span
+    spans = await db.list_activity_spans()
+    assert len(spans) == 3
+    assert spans[0]["activity"] == "sitting" and spans[0]["started_at"] == t6.isoformat()
+    assert spans[1]["activity"] == "standing" and spans[1]["ended_at"] == t6.isoformat()
+    assert spans[2]["activity"] == "sitting" and spans[2]["ended_at"] == t5.isoformat()
+
+
+

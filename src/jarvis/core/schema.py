@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+import time
+from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any, Literal
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
@@ -19,6 +20,15 @@ def ensure_aware(value: datetime) -> datetime:
     if value.tzinfo is None or value.tzinfo.utcoffset(value) is None:
         return value.astimezone()
     return value
+
+
+def get_system_boot_time() -> datetime | None:
+    """Return the system boot time as a timezone-aware datetime, if detectable."""
+    try:
+        uptime_sec = time.clock_gettime(time.CLOCK_BOOTTIME)
+        return datetime.now(timezone.utc).astimezone() - timedelta(seconds=uptime_sec)
+    except (AttributeError, OSError, ValueError):
+        return None
 
 
 AwareDatetime = Annotated[datetime, AfterValidator(ensure_aware)]

@@ -15,6 +15,7 @@ from jarvis.core.schema import (
     EffectiveActivityState,
     PlatformEvent,
     ensure_aware,
+    get_system_boot_time,
     now_local,
 )
 from jarvis.core.settings import Settings
@@ -102,6 +103,7 @@ class StateResolver:
         self._dnd_mode = bool(self._settings.privacy.dnd_mode)
 
         now = now_local()
+        boot_time = get_system_boot_time()
         current_span = await self._db.get_current_activity_span()
         if current_span is not None:
             raw_activity = str(current_span.get("activity", "unknown"))
@@ -129,6 +131,40 @@ class StateResolver:
                     if candidate > now:
                         expires_at = candidate
 
+            # Check if this span is stale (e.g. machine rebooted, override expired, or long gap)
+            is_stale = False
+            stale_ended_at: datetime = now
+
+            if boot_time and started_at < boot_time:
+                is_stale = True
+                if isinstance(metadata, dict) and metadata.get("override_expires_at"):
+                    cand = ensure_aware(datetime.fromisoformat(metadata["override_expires_at"]))
+                    stale_ended_at = min(cand, boot_time)
+                else:
+                    stale_ended_at = boot_time
+            elif reason == "manual_override" and expires_at is None:
+                is_stale = True
+                if isinstance(metadata, dict) and metadata.get("override_expires_at"):
+                    stale_ended_at = ensure_aware(datetime.fromisoformat(metadata["override_expires_at"]))
+                elif isinstance(metadata, dict) and metadata.get("ttl_minutes"):
+                    stale_ended_at = started_at + timedelta(minutes=float(metadata["ttl_minutes"]))
+                else:
+                    stale_ended_at = started_at
+            elif reason != "manual_override" and (now - started_at).total_seconds() > 14400:
+                is_stale = True
+                stale_ended_at = started_at + timedelta(seconds=1800)
+
+            if is_stale:
+                logger.info(
+                    "Closing stale activity span %s (%s) ended at %s",
+                    current_span.get("id"),
+                    activity,
+                    stale_ended_at.isoformat(),
+                )
+                await self._db.close_current_activity_span(ended_at=stale_ended_at)
+                current_span = None
+
+        if current_span is not None:
             self._activity = activity
             self._source = str(current_span.get("source", "system"))
             self._confidence = float(current_span.get("confidence", 1.0))
@@ -421,6 +457,12 @@ class StateResolver:
         metadata: dict[str, Any] | None = None,
     ) -> None:
         previous_activity = self._activity
+        min_duration = float(
+            getattr(self._settings.posture, "min_session_duration_seconds", 30)
+        )
+        max_resume_gap = float(
+            getattr(self._settings.posture, "max_resume_gap_seconds", 120)
+        )
         span = await self._db.open_activity_span(
             activity=activity,
             source=source,
@@ -428,13 +470,19 @@ class StateResolver:
             reason=reason,
             started_at=started_at,
             metadata=metadata,
+            min_duration_seconds=min_duration,
+            max_resume_gap_seconds=max_resume_gap,
+        )
+
+        effective_started_at = ensure_aware(
+            datetime.fromisoformat(str(span["started_at"]))
         )
 
         self._activity = activity
         self._source = source
         self._confidence = confidence
         self._reason = reason
-        self._started_at = started_at
+        self._started_at = effective_started_at
         self._override_expires_at = override_expires_at
         self._has_open_span = True
 
@@ -449,7 +497,7 @@ class StateResolver:
                     "activity": activity,
                     "activity_source": source,
                     "reason": reason,
-                    "started_at": started_at.isoformat(),
+                    "started_at": effective_started_at.isoformat(),
                     "override_expires_at": (
                         override_expires_at.isoformat()
                         if override_expires_at is not None

@@ -12,6 +12,7 @@ from typing import Any
 import aiosqlite
 
 from jarvis.core.migrations import apply_migrations
+from jarvis.core.schema import get_system_boot_time
 from jarvis.core.settings import DEFAULT_MIGRATIONS_DIR
 
 VALID_RECOMMENDATION_RESOLUTIONS = frozenset(
@@ -177,16 +178,78 @@ class Database:
         reason: str = "state_change",
         started_at: datetime | str | None = None,
         metadata: dict[str, Any] | None = None,
+        min_duration_seconds: float = 30.0,
+        max_resume_gap_seconds: float = 120.0,
     ) -> dict[str, Any]:
         started_iso = _to_iso(started_at)
         metadata_json = _dumps_optional_json(metadata)
+        current_dt = _to_dt(started_iso)
 
         async with self._lock:
             conn = self.connection
-            await conn.execute(
-                "UPDATE activity_spans SET ended_at = ? WHERE ended_at IS NULL",
-                (started_iso,),
-            )
+            async with conn.execute(
+                "SELECT id, started_at FROM activity_spans WHERE ended_at IS NULL"
+            ) as cur:
+                open_rows = await cur.fetchall()
+
+            boot_dt = get_system_boot_time()
+            for row in open_rows:
+                row_id = row["id"]
+                end_dt = current_dt
+                row_start = _to_dt(row["started_at"])
+                if boot_dt and row_start < boot_dt < end_dt:
+                    end_dt = boot_dt
+                duration_seconds = (end_dt - row_start).total_seconds()
+                if min_duration_seconds > 0 and duration_seconds < min_duration_seconds:
+                    await conn.execute(
+                        "DELETE FROM activity_spans WHERE id = ?",
+                        (row_id,),
+                    )
+                else:
+                    await conn.execute(
+                        "UPDATE activity_spans SET ended_at = ? WHERE id = ?",
+                        (end_dt.isoformat(), row_id),
+                    )
+
+            if max_resume_gap_seconds > 0:
+                async with conn.execute(
+                    """
+                    SELECT * FROM activity_spans
+                    WHERE ended_at IS NOT NULL
+                    ORDER BY started_at DESC, id DESC
+                    LIMIT 1
+                    """
+                ) as last_cur:
+                    last_row = await last_cur.fetchone()
+
+                if last_row is not None and last_row["activity"] == activity:
+                    last_end = _to_dt(last_row["ended_at"])
+                    gap = (current_dt - last_end).total_seconds()
+                    if -5.0 <= gap <= max_resume_gap_seconds:
+                        span_id = last_row["id"]
+                        await conn.execute(
+                            """
+                            UPDATE activity_spans
+                            SET ended_at = NULL,
+                                source = ?,
+                                confidence = ?,
+                                reason = ?,
+                                metadata_json = COALESCE(?, metadata_json)
+                            WHERE id = ?
+                            """,
+                            (source, float(confidence), reason, metadata_json, span_id),
+                        )
+                        await conn.commit()
+
+                        async with conn.execute(
+                            "SELECT * FROM activity_spans WHERE id = ?",
+                            (span_id,),
+                        ) as fetch_cursor:
+                            row = await fetch_cursor.fetchone()
+                        result = _row_to_dict(row)
+                        assert result is not None
+                        return result
+
             cursor = await conn.execute(
                 """
                 INSERT INTO activity_spans (
@@ -211,14 +274,16 @@ class Database:
     async def close_current_activity_span(
         self,
         ended_at: datetime | str | None = None,
+        min_duration_seconds: float = 30.0,
     ) -> dict[str, Any] | None:
         ended_iso = _to_iso(ended_at)
+        end_dt = _to_dt(ended_iso)
 
         async with self._lock:
             conn = self.connection
             async with conn.execute(
                 """
-                SELECT id FROM activity_spans
+                SELECT id, started_at FROM activity_spans
                 WHERE ended_at IS NULL
                 ORDER BY id DESC
                 LIMIT 1
@@ -229,9 +294,19 @@ class Database:
                 return None
 
             span_id = int(row["id"])
+            row_start = _to_dt(row["started_at"])
+            boot_dt = get_system_boot_time()
+            if boot_dt and row_start < boot_dt < end_dt:
+                end_dt = boot_dt
+            duration_seconds = (end_dt - row_start).total_seconds()
+            if min_duration_seconds > 0 and duration_seconds < min_duration_seconds:
+                await conn.execute("DELETE FROM activity_spans WHERE id = ?", (span_id,))
+                await conn.commit()
+                return None
+
             await conn.execute(
-                "UPDATE activity_spans SET ended_at = ? WHERE ended_at IS NULL",
-                (ended_iso,),
+                "UPDATE activity_spans SET ended_at = ? WHERE id = ?",
+                (end_dt.isoformat(), span_id),
             )
             await conn.commit()
 
@@ -655,10 +730,21 @@ class Database:
 
         async with self._lock:
             conn = self.connection
-            await conn.execute(
-                "UPDATE window_spans SET ended_at = ? WHERE ended_at IS NULL",
-                (started_iso,),
-            )
+            async with conn.execute(
+                "SELECT id, started_at FROM window_spans WHERE ended_at IS NULL"
+            ) as cur:
+                open_win_rows = await cur.fetchall()
+
+            boot_dt = get_system_boot_time()
+            for wrow in open_win_rows:
+                wend_dt = _to_dt(started_iso)
+                wstart_dt = _to_dt(wrow["started_at"])
+                if boot_dt and wstart_dt < boot_dt < wend_dt:
+                    wend_dt = boot_dt
+                await conn.execute(
+                    "UPDATE window_spans SET ended_at = ? WHERE id = ?",
+                    (wend_dt.isoformat(), wrow["id"]),
+                )
             cursor = await conn.execute(
                 """
                 INSERT INTO window_spans (

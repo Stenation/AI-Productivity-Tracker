@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +18,7 @@ from jarvis.core.database import Database
 from jarvis.core.migrations import get_applied_migrations
 from jarvis.core.registry import ModuleRegistry
 from jarvis.core.resolver import StateResolver
-from jarvis.core.schema import now_local
+from jarvis.core.schema import ensure_aware, now_local
 from jarvis.core.settings import Settings, load_settings
 from jarvis.core.timer import TimerManager
 from jarvis.web.api import router as api_router
@@ -104,6 +105,21 @@ def create_app(
                 await active_tm.stop()
             await timer_manager.stop()
             await resolver.stop()
+            try:
+                curr_span = await db.get_current_activity_span()
+                if curr_span:
+                    s_reason = curr_span.get("reason")
+                    s_meta = curr_span.get("metadata") or {}
+                    s_exp = s_meta.get("override_expires_at")
+                    is_active_override = (
+                        s_reason == "manual_override"
+                        and s_exp
+                        and ensure_aware(datetime.fromisoformat(s_exp)) > now_local()
+                    )
+                    if not is_active_override:
+                        await db.close_current_activity_span(ended_at=now_local())
+            except Exception as exc:
+                logging.getLogger(__name__).warning("Error closing activity span on shutdown: %s", exc)
             await db.close()
 
     app = FastAPI(

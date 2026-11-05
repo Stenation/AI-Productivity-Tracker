@@ -68,6 +68,7 @@ async def test_manual_control_set_and_full_cycle_persistence(
 ) -> None:
     app, client = api_env
     db: Database = app.state.db
+    app.state.settings.posture.min_session_duration_seconds = 0
 
     # Initial /api/state snapshot
     state_resp = await client.get("/api/state")
@@ -137,6 +138,60 @@ async def test_manual_control_set_and_full_cycle_persistence(
     assert len(raw_spans) == 7
     assert all(s["source"] == "manual_control" for s in raw_spans)
     assert all(s["confidence"] == 1.0 for s in raw_spans)
+
+
+async def test_api_accidental_cycle_under_30s_resumes_sitting_session(
+    api_env: tuple[FastAPI, httpx.AsyncClient],
+) -> None:
+    app, client = api_env
+    db: Database = app.state.db
+
+    # User sits down initially with 60m override
+    post_resp = await client.post(
+        "/api/activity",
+        json={"activity": "sitting", "ttl_minutes": 60},
+    )
+    assert post_resp.status_code == 200
+    current_span = await db.get_current_activity_span()
+    assert current_span is not None
+    span_id = current_span["id"]
+
+    # Backdate started_at to 30 minutes ago
+    t0 = datetime.now().astimezone() - timedelta(minutes=30)
+    await db.connection.execute(
+        "UPDATE activity_spans SET started_at = ? WHERE id = ?",
+        (t0.isoformat(), span_id),
+    )
+    await db.connection.commit()
+    await app.state.resolver.start()
+
+    state0 = (await client.get("/api/state")).json()
+    assert state0["activity"] == "sitting"
+    assert state0["elapsed_seconds"] >= 1800
+
+    # User accidentally cycles: stand -> walk -> away -> sit in under 30s
+    c1 = await client.post("/api/activity/cycle")
+    assert c1.json()["activity"] == "standing"
+
+    c2 = await client.post("/api/activity/cycle")
+    assert c2.json()["activity"] == "walking"
+
+    c3 = await client.post("/api/activity/cycle")
+    assert c3.json()["activity"] == "away"
+
+    c4 = await client.post("/api/activity/cycle")
+    assert c4.json()["activity"] == "sitting"
+
+    # State should have resumed sitting at ~30m, NOT restarted at 0!
+    state_after = (await client.get("/api/state")).json()
+    assert state_after["activity"] == "sitting"
+    assert state_after["elapsed_seconds"] >= 1800
+
+    # History should only contain the 1 sitting span, NOT the accidental stand/walk/away spans
+    hist = (await client.get("/api/history/activity")).json()
+    assert hist["count"] == 1
+    assert hist["spans"][0]["activity"] == "sitting"
+    assert hist["spans"][0]["ended_at"] is None
 
 
 async def test_timer_manager_work_break_completed_transitions(

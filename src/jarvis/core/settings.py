@@ -136,6 +136,8 @@ class PostureSettings(BaseModel):
     recommendation_cooldown_minutes: int = Field(default=30, ge=0)
     sensor_consensus_samples: int = Field(default=4, ge=1)
     sensor_consensus_window_samples: int = Field(default=5, ge=1)
+    min_session_duration_seconds: int = Field(default=30, ge=0)
+    max_resume_gap_seconds: int = Field(default=120, ge=0)
 
 
 class PomodoroSettings(BaseModel):
@@ -227,7 +229,7 @@ class FocusSettings(BaseModel):
     )
     app_class_rules: dict[str, str] = Field(default_factory=dict)
     enable_llm_fallback: bool = False
-    llm_model: str = "qwen2.5:1.5b"
+    llm_model: str = "qwen2.5:0.5b"
     llm_min_dwell_seconds: float = Field(default=3.0, ge=0.0)
     llm_timeout_seconds: float = Field(default=10.0, gt=0.0)
 

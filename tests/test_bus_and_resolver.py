@@ -667,3 +667,134 @@ database:
     assert captured["host"] == "127.0.0.1"
     assert captured["port"] == 8765
     assert captured["app"].title == "Jarvis Posture Platform"
+
+
+async def test_state_resolver_startup_detects_and_closes_stale_or_preboot_spans(
+    db: Database,
+    test_settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now().astimezone()
+    yesterday = now - timedelta(days=1)
+    fake_boot = now - timedelta(hours=2)
+
+    await db.open_activity_span(
+        activity="sitting",
+        source="manual_control",
+        reason="manual_override",
+        started_at=yesterday,
+        metadata={
+            "ttl_minutes": 30.0,
+            "override_expires_at": (yesterday + timedelta(minutes=30)).isoformat(),
+        },
+    )
+
+    monkeypatch.setattr("jarvis.core.resolver.get_system_boot_time", lambda: fake_boot)
+
+    bus = EventBus()
+    resolver = StateResolver(bus=bus, db=db, settings=test_settings)
+    state = await resolver.start()
+
+    assert state.activity == "unknown"
+    assert state.reason == "startup"
+
+    spans = await db.list_activity_spans()
+    assert len(spans) == 1
+    assert spans[0]["ended_at"] is not None
+    assert spans[0]["ended_at"] == (yesterday + timedelta(minutes=30)).isoformat()
+    await resolver.stop()
+
+
+async def test_resolver_accidental_cycle_under_30s_resumes_previous_duration(
+    db: Database,
+    test_settings: Settings,
+) -> None:
+    bus = EventBus()
+    resolver = StateResolver(bus=bus, db=db, settings=test_settings)
+    await resolver.start()
+
+    events: list[PlatformEvent] = []
+    bus.subscribe("activity_state_changed", events.append)
+
+    t0 = datetime(2026, 11, 3, 10, 0, 0).astimezone()
+
+    # 1. User starts sitting
+    await bus.publish(
+        PlatformEvent(
+            type="activity_reported",
+            source="manual_control",
+            timestamp=t0,
+            payload={"activity": "sitting", "ttl_minutes": 30},
+        )
+    )
+    assert resolver.get_effective_state(now=t0).activity == "sitting"
+    assert resolver.get_effective_state(now=t0 + timedelta(minutes=30)).elapsed_seconds == 1800
+
+    # 2. At 30m, accidentally cycle to stand (2s)
+    t1 = t0 + timedelta(minutes=30)
+    await bus.publish(
+        PlatformEvent(
+            type="activity_reported",
+            source="manual_control",
+            timestamp=t1,
+            payload={"activity": "standing", "ttl_minutes": 30},
+        )
+    )
+    assert resolver.get_effective_state(now=t1).activity == "standing"
+
+    # 3. Cycle to walking (2s)
+    t2 = t1 + timedelta(seconds=2)
+    await bus.publish(
+        PlatformEvent(
+            type="activity_reported",
+            source="manual_control",
+            timestamp=t2,
+            payload={"activity": "walking", "ttl_minutes": 30},
+        )
+    )
+    assert resolver.get_effective_state(now=t2).activity == "walking"
+
+    # 4. Cycle to away (2s)
+    t3 = t2 + timedelta(seconds=2)
+    await bus.publish(
+        PlatformEvent(
+            type="activity_reported",
+            source="manual_control",
+            timestamp=t3,
+            payload={"activity": "away", "ttl_minutes": 30},
+        )
+    )
+    assert resolver.get_effective_state(now=t3).activity == "away"
+
+    # 5. Cycle back to sitting (2s after away)
+    t4 = t3 + timedelta(seconds=2)
+    await bus.publish(
+        PlatformEvent(
+            type="activity_reported",
+            source="manual_control",
+            timestamp=t4,
+            payload={"activity": "sitting", "ttl_minutes": 30},
+        )
+    )
+    eff = resolver.get_effective_state(now=t4)
+    assert eff.activity == "sitting"
+    # Should NOT have reset to 0! Started_at should be original t0!
+    assert eff.started_at == t0
+    # Elapsed duration should be 30m + 6s = 1806s
+    assert eff.elapsed_seconds == 1806
+
+    # Verify activity_state_changed event carried original started_at
+    last_event = events[-1]
+    assert last_event.payload["activity"] == "sitting"
+    assert last_event.payload["started_at"] == t0.isoformat()
+
+    # Verify only the sitting span exists in DB (transient spans under 30s were not saved)
+    spans = await db.list_activity_spans()
+    assert len(spans) == 1
+    assert spans[0]["activity"] == "sitting"
+    assert spans[0]["started_at"] == t0.isoformat()
+    assert spans[0]["ended_at"] is None
+
+    await resolver.stop()
+
+

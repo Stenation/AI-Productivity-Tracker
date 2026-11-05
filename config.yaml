@@ -55,6 +55,8 @@ posture:
   recommendation_cooldown_minutes: 30
   sensor_consensus_samples: 4
   sensor_consensus_window_samples: 5
+  min_session_duration_seconds: 30
+  max_resume_gap_seconds: 120
 
 pomodoro:
   deep_work: "50_10"
@@ -76,7 +78,7 @@ focus:
   max_prompts_per_hour: 4
   recommendation_cooldown_minutes: 15
   enable_llm_fallback: true       # small local LLM fallback for ambiguous / unknown windows
-  llm_model: "qwen3:14b"
+  llm_model: "qwen2.5:0.5b"       # install via: ollama pull qwen2.5:0.5b (only ~390MB, fast ~40ms)
   llm_min_dwell_seconds: 3.0
   llm_timeout_seconds: 10.0
 
