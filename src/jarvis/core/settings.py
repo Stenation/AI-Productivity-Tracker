@@ -156,6 +156,8 @@ class PomodoroSettings(BaseModel):
     meeting: str | None = None
     break_: str | None = Field(default=None, alias="break")
     unknown: str | None = None
+    default_preset: str = "50_10"
+    prefer_shorter_intervals_for_high_effort: bool = True
     auto_start: bool = False
     recommendation_cooldown_minutes: int = Field(default=30, ge=0)
 

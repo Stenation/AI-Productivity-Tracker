@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import Callable, Mapping, MutableMapping
 from datetime import datetime, timedelta
 from typing import Any
@@ -84,6 +85,293 @@ def is_walking_suitable(task_type: str | None) -> bool:
         return False
     normalized = str(task_type).strip().lower()
     return normalized in WALKING_SUITABLE_TASK_TYPES
+
+
+FLOW_OR_NO_TIMER_REGEX: re.Pattern[str] = re.compile(
+    r"(?i)(?:^|[\s#\[(])(?:flow|uninterrupted|notimer|no[-_]timer|flow\s*state)(?:$|[\s#\])])"
+)
+
+SHORT_POMO_FALLBACK_REGEX: re.Pattern[str] = re.compile(
+    r"(?i)(?:^|[\s\[(])(#shortpomo|\[shortpomo\]|#25m|\[25m\]|shortpomo)(?=\s|$|[.,!?;\])])"
+)
+
+HIGH_MENTAL_EFFORT_REGEX: re.Pattern[str] = re.compile(
+    r"(?i)(?:^|[\s\[(])(#intense|\[intense\]|#demanding|\[demanding\]|#challenging|"
+    r"#sprint|\[sprint\]|#debugging|debugging|#dense|#complex|"
+    r"#25m|\[25m\])(?=\s|$|[.,!?;\])])"
+)
+
+HIGH_RESTART_COST_REGEX: re.Pattern[str] = re.compile(
+    r"(?i)(?:^|[\s\[(])(#deep|\[deep\]|#immersive|\[immersive\]|#architecture|"
+    r"\[architecture\]|#longform|#50m|\[50m\])(?=\s|$|[.,!?;\])])"
+)
+
+MIN_AUTOMATIC_MINUTES_50_10 = 120.0  # At least 2 hours for 50/10
+MIN_AUTOMATIC_MINUTES_SHORTER = 60.0  # At least 1 hour for shorter preset (25/5)
+
+DEFAULT_SHORTER_PRESET_TASKS: frozenset[str] = frozenset(
+    {"admin", "email", "planning"}
+)
+
+
+def normalize_event_preset(value: Any) -> str | None:
+    """Normalize explicit preset value or alias to '25_5', '50_10', 'none', or None."""
+    if not isinstance(value, str):
+        return None
+    clean = value.strip().lower()
+    if clean in {"25_5", "25", "25m", "25/5"}:
+        return "25_5"
+    if clean in {"50_10", "50", "50m", "50/10"}:
+        return "50_10"
+    if clean in {"none", "off", "no_timer", "notimer"}:
+        return "none"
+    return None
+
+
+def parse_cognitive_factors(
+    target_event: Mapping[str, Any] | None,
+) -> tuple[bool, bool]:
+    """Extract (has_high_mental_effort, has_high_restart_cost) heuristics from event context.
+
+    Note: These are configurable user-preference heuristics, not clinical or universal facts:
+    - Mental effort / difficulty sustaining attention: suggests shorter 25/5 intervals.
+    - Need for uninterrupted concentration / high restart cost: suggests 50/10 or flow.
+    """
+    if not target_event:
+        return False, False
+
+    high_mental_effort = False
+    high_restart_cost = False
+
+    # Mental effort / difficulty sustaining attention
+    effort_val = str(
+        target_event.get("mental_effort") or target_event.get("difficulty") or ""
+    ).strip().lower()
+    if effort_val in {"high", "very_high", "demanding", "hard"} or (
+        target_event.get("difficulty_sustaining_attention") is True
+    ):
+        high_mental_effort = True
+
+    # Need for uninterrupted concentration / high restart cost
+    restart_val = str(
+        target_event.get("restart_cost") or target_event.get("concentration_need") or ""
+    ).strip().lower()
+    if restart_val in {"high", "very_high", "deep"} or target_event.get("uninterrupted") is True:
+        high_restart_cost = True
+
+    title = str(target_event.get("title") or "")
+    desc = str(target_event.get("description") or "")
+    combined = f"{title} {desc}".strip()
+    if combined:
+        if not high_mental_effort and HIGH_MENTAL_EFFORT_REGEX.search(combined):
+            high_mental_effort = True
+        if not high_restart_cost and HIGH_RESTART_COST_REGEX.search(combined):
+            high_restart_cost = True
+
+    return high_mental_effort, high_restart_cost
+
+
+def select_task_preset(
+    target_event: Mapping[str, Any] | None,
+    task_type: str | None,
+    config: Any = None,
+) -> str | None:
+    """Select the appropriate Pomodoro preset ('50_10', '25_5', or None) for this task context.
+
+    Considers cognitive intensity and restart cost heuristics rather than rigid task mappings:
+    - Mental effort / difficulty sustaining attention: heuristics favor '25_5'.
+    - Need for uninterrupted concentration / high restart cost: heuristics favor '50_10'.
+    - Explicit user preferences and event tags take precedence.
+    - Uses conservative, configurable defaults when context is limited.
+    """
+    if target_event is None and task_type is None:
+        return None
+
+    normalized_task = str(task_type).strip().lower() if task_type is not None else "unknown"
+
+    # 1. Explicit preset in event metadata or tags
+    if target_event:
+        explicit_norm = normalize_event_preset(
+            target_event.get("preferred_preset") or target_event.get("preset")
+        )
+        if explicit_norm in {"25_5", "50_10"}:
+            return explicit_norm
+        if explicit_norm == "none":
+            return None
+
+        title = str(target_event.get("title") or "")
+        desc = str(target_event.get("description") or "")
+        combined = f"{title} {desc}".strip()
+        if combined:
+            if re.search(
+                r"(?i)(?:^|[\s\[(])(#25m|\[25m\]|#25_5)(?=\s|$|[.,!?;\])])",
+                combined,
+            ):
+                return "25_5"
+            if re.search(
+                r"(?i)(?:^|[\s\[(])(#50m|\[50m\]|#50_10)(?=\s|$|[.,!?;\])])",
+                combined,
+            ):
+                return "50_10"
+
+    # 2. Cognitive factor evaluation: mental effort vs. restart cost
+    high_mental_effort, high_restart_cost = parse_cognitive_factors(target_event)
+
+    # High mental effort / difficulty sustaining attention favors 25/5
+    if high_mental_effort and not high_restart_cost:
+        return "25_5"
+
+    # High restart cost favors 50/10
+    if high_restart_cost and not high_mental_effort:
+        return "50_10"
+
+    # 3. Conservative, configurable defaults when context is limited
+    return select_pomodoro(normalized_task, config)
+
+
+def task_suits_shorter_preset(
+    task_type: str | None,
+    target_event: Mapping[str, Any] | None = None,
+    config: Any = None,
+) -> bool:
+    """Return True if the task or event context also suits the shorter 25/5 preset.
+
+    Tasks with high mental effort or difficulty sustaining attention may suit shorter
+    intervals based on user preference heuristics.
+    Tasks with high restart cost avoid downshifting to 25/5.
+    """
+    if task_type is None and target_event is None:
+        return False
+
+    normalized = str(task_type).strip().lower() if task_type is not None else ""
+    high_mental_effort, high_restart_cost = parse_cognitive_factors(target_event)
+
+    # Strictly high restart cost suppresses downshifting
+    if high_restart_cost:
+        return False
+
+    # Check event indicators for shorter interval suitability
+    if target_event:
+        if target_event.get("allow_shorter_preset") is True:
+            return True
+        if high_mental_effort:
+            return True
+        title = str(target_event.get("title") or "")
+        desc = str(target_event.get("description") or "")
+        combined = f"{title} {desc}".strip()
+        if combined and SHORT_POMO_FALLBACK_REGEX.search(combined):
+            return True
+
+    # Routine / admin / planning tasks
+    if normalized in DEFAULT_SHORTER_PRESET_TASKS:
+        return True
+
+    # Check config for allowed fallback tasks or global flag
+    if isinstance(config, Mapping):
+        pomo_cfg = config.get("pomodoro") if isinstance(config.get("pomodoro"), Mapping) else config
+        allowed_list = pomo_cfg.get("allow_shorter_fallback_tasks")
+        if isinstance(allowed_list, (list, tuple, set, frozenset)):
+            if normalized in {str(t).lower() for t in allowed_list}:
+                return True
+        if pomo_cfg.get("allow_shorter_preset_fallback") is True:
+            return True
+
+    return False
+
+
+def is_pomodoro_appropriate(
+    target_event: Mapping[str, Any] | None,
+    task_type: str | None,
+    config: Any = None,
+) -> bool:
+    """Return True only if a Pomodoro recommendation is appropriate and useful for this context.
+
+    'No recommendation' is a valid, intentional outcome when the activity does not
+    benefit from timeboxing, the user prefers uninterrupted flow, or context is insufficient.
+    """
+    if target_event is None and task_type is None:
+        return False
+
+    normalized_task = str(task_type).strip().lower() if task_type is not None else ""
+    if normalized_task in {"unknown", "meeting", "break"}:
+        return False
+
+    # Explicit user opt-outs in event
+    if target_event:
+        if target_event.get("pomodoro_enabled") is False or target_event.get("timeboxing") is False:
+            return False
+        if target_event.get("uninterrupted") is True or target_event.get("flow") is True:
+            return False
+        raw_pref = target_event.get("preferred_preset") or target_event.get("preset")
+        if normalize_event_preset(raw_pref) == "none":
+            return False
+
+        title = str(target_event.get("title") or "")
+        desc = str(target_event.get("description") or "")
+        combined = f"{title} {desc}".strip()
+        if combined and FLOW_OR_NO_TIMER_REGEX.search(combined):
+            return False
+
+    # Check config: if user mapped this task type to None, timeboxing is opted out by default
+    base_preset = select_pomodoro(normalized_task, config)
+    if base_preset is None:
+        raw_pref = (
+            target_event.get("preferred_preset") or target_event.get("preset")
+            if target_event
+            else None
+        )
+        if normalize_event_preset(raw_pref) not in {"25_5", "50_10"}:
+            return False
+
+    return True
+
+
+def fit_pomodoro_preset(
+    base_kind: str,
+    available_minutes: float | None,
+    *,
+    suits_shorter: bool = False,
+) -> tuple[str | None, bool]:
+    """Fit a Pomodoro preset against remaining available minutes.
+
+    Requirements:
+    - 50/10: at least two hours (120 minutes) of available time.
+    - Shorter preset (25/5): at least one hour (60 minutes) of available time.
+    - Under one hour (< 60 minutes): no automatic Pomodoro suggestion.
+    - Having enough time must NOT automatically upgrade to a longer preset.
+    - If the preferred preset does not fit, suggest the shorter one ONLY if
+      it also suits the task; otherwise suggest nothing.
+
+    Note on available_minutes=None:
+        An unconstrained schedule window (e.g. all-day event or open-ended block)
+        has no known calendar boundary cutting the session short. It is treated as
+        unconstrained for timer fitting, not as proof that the user is actually free.
+
+    Returns:
+        (fitted_kind, is_downshifted)
+        Returns (None, False) if no preset fits or is appropriate.
+    """
+    if available_minutes is None:
+        return base_kind, False
+
+    # Under one hour: no automatic Pomodoro suggestion
+    if available_minutes < MIN_AUTOMATIC_MINUTES_SHORTER:
+        return None, False
+
+    if base_kind == "50_10":
+        if available_minutes >= MIN_AUTOMATIC_MINUTES_50_10:
+            return "50_10", False
+        # 50/10 does not fit (< 120m). Suggest shorter preset ONLY if task also suits it
+        if available_minutes >= MIN_AUTOMATIC_MINUTES_SHORTER and suits_shorter:
+            return "25_5", True
+        return None, False
+
+    if base_kind == "25_5":
+        if available_minutes >= MIN_AUTOMATIC_MINUTES_SHORTER:
+            return "25_5", False
+        return None, False
+
+    return None, False
 
 
 def _parse_dt(value: datetime | str | None) -> datetime | None:
@@ -227,14 +515,53 @@ class PomodoroPolicyModule(BaseModule):
                     continue
 
                 task_type = str(target_event.get("task_type", "unknown")).strip().lower()
-                if not task_type or task_type == "unknown":
+
+                # Stage 1: Appropriateness Gate
+                if not is_pomodoro_appropriate(target_event, task_type, self.config):
                     continue
-                kind = select_pomodoro(task_type, self.config)
+
+                base_kind = select_task_preset(target_event, task_type, self.config)
+                if base_kind is None:
+                    continue
+
+                # Stage 2: Calculate Available Schedule Window
+                start_dt = _parse_dt(target_event.get("start_time"))
+                end_dt = _parse_dt(target_event.get("end_time"))
+                is_all_day = bool(target_event.get("is_all_day"))
+
+                available_mins: float | None = None
+                if not is_all_day:
+                    if is_active_block:
+                        if end_dt is not None:
+                            available_mins = (end_dt - ref_now).total_seconds() / 60.0
+                            if available_mins <= 0:
+                                continue
+                    else:
+                        if start_dt is not None and end_dt is not None:
+                            available_mins = (end_dt - start_dt).total_seconds() / 60.0
+                            if available_mins <= 0:
+                                continue
+
+                if is_active_block and next_event is not None:
+                    next_start = _parse_dt(next_event.get("start_time"))
+                    if next_start is not None and next_start > ref_now:
+                        time_until_next = (next_start - ref_now).total_seconds() / 60.0
+                        if available_mins is None:
+                            available_mins = time_until_next
+                        else:
+                            available_mins = min(available_mins, time_until_next)
+
+                suits_shorter = task_suits_shorter_preset(task_type, target_event, self.config)
+                kind, is_downshifted = fit_pomodoro_preset(
+                    base_kind,
+                    available_mins,
+                    suits_shorter=suits_shorter,
+                )
                 if kind is None:
                     continue
 
                 dedupe_key = f"pomodoro:event:{event_id}"
-                if await self._is_suppressed(dedupe_key, now=ref_now):
+                if await self._is_suppressed(dedupe_key, now=ref_now, event_end=end_dt):
                     continue
 
                 explicit_walking = target_event.get("suitable_for_walking")
@@ -250,12 +577,15 @@ class PomodoroPolicyModule(BaseModule):
                     walking_suitable=walking_suitable,
                     is_active_block=is_active_block,
                     now=ref_now,
+                    is_downshifted=is_downshifted,
                 )
                 action_payload: dict[str, Any] = {
                     "kind": kind,
                     "walking_suitable": walking_suitable,
                     "calendar_event_id": event_id,
                     "task_type": task_type,
+                    "downshifted": is_downshifted,
+                    "original_kind": base_kind,
                 }
                 if self._current_activity:
                     action_payload["current_activity"] = self._current_activity
@@ -270,29 +600,82 @@ class PomodoroPolicyModule(BaseModule):
 
             return None
 
-    async def _is_suppressed(self, dedupe_key: str, *, now: datetime) -> bool:
+    async def _is_suppressed(
+        self,
+        dedupe_key: str,
+        *,
+        now: datetime,
+        event_end: datetime | None = None,
+    ) -> bool:
         pending_rows = await self.db.get_pending_recommendations()
         if any(row.get("dedupe_key") == dedupe_key for row in pending_rows):
             return True
 
-        latest = await self.db.find_recent_recommendation(dedupe_key)
-        if latest is None:
+        recent = await self.db.get_recent_recommendations_for_dedupe(dedupe_key, limit=5)
+        if not recent:
             return False
+
+        latest = recent[0]
         if latest.get("status") == "pending":
             return True
 
-        effective_cooldown = self.cooldown_minutes()
-        if latest.get("status") == "snoozed":
-            metadata = latest.get("resolution_metadata")
-            if isinstance(metadata, dict) and metadata.get("snooze_minutes") is not None:
-                effective_cooldown = float(metadata["snooze_minutes"])
+        metadata = latest.get("resolution_metadata")
+        if isinstance(metadata, dict):
+            cooldown_until_raw = metadata.get("cooldown_until") or metadata.get("snoozed_until")
+            if cooldown_until_raw:
+                cooldown_until = _parse_dt(cooldown_until_raw)
+                if cooldown_until is not None and now < cooldown_until:
+                    return True
 
-        if effective_cooldown <= 0:
-            return False
+        latest_status = latest.get("status")
+        base_cooldown = self.cooldown_minutes()
 
-        since = now - timedelta(minutes=effective_cooldown) + timedelta(microseconds=1)
-        recent = await self.db.find_recent_recommendation(dedupe_key, since=since)
-        return recent is not None
+        if latest_status == "snoozed":
+            snooze_mins = (
+                float(metadata["snooze_minutes"])
+                if isinstance(metadata, dict) and metadata.get("snooze_minutes") is not None
+                else base_cooldown
+            )
+            if snooze_mins <= 0:
+                return False
+            raw_resolved = latest.get("resolved_at") or latest.get("created_at")
+            resolved_at = _parse_dt(raw_resolved) or now
+            return now < (resolved_at + timedelta(minutes=snooze_mins))
+
+        if latest_status == "dismissed":
+            consecutive_dismissals = 0
+            for r in recent:
+                if r.get("status") == "dismissed":
+                    consecutive_dismissals += 1
+                elif r.get("status") == "accepted":
+                    break
+                else:
+                    break
+
+            if consecutive_dismissals >= 3:
+                # Suppress for the remainder of this calendar block!
+                if event_end is not None and now < event_end:
+                    return True
+                effective_mins = base_cooldown * 4
+            elif consecutive_dismissals == 2:
+                effective_mins = base_cooldown * 2
+            else:
+                effective_mins = base_cooldown
+
+            if effective_mins <= 0:
+                return False
+            raw_resolved = latest.get("resolved_at") or latest.get("created_at")
+            resolved_at = _parse_dt(raw_resolved) or now
+            return now < (resolved_at + timedelta(minutes=effective_mins))
+
+        if latest_status == "accepted":
+            if base_cooldown <= 0:
+                return False
+            raw_resolved = latest.get("resolved_at") or latest.get("created_at")
+            resolved_at = _parse_dt(raw_resolved) or now
+            return now < (resolved_at + timedelta(minutes=base_cooldown))
+
+        return False
 
     async def _create_and_publish(
         self,
@@ -518,13 +901,18 @@ class PomodoroPolicyModule(BaseModule):
         walking_suitable: bool,
         is_active_block: bool,
         now: datetime,
+        is_downshifted: bool = False,
     ) -> str:
         title = str(target_event.get("title") or "Focus block")
-        task_type = str(target_event.get("task_type", "")).strip().lower()
 
-        if task_type in {"admin", "email", "planning"}:
-            timer_label = "walking-suitable 25/5 block"
-        elif task_type in {"deep_work", "coding"}:
+        if is_downshifted:
+            timer_label = "25/5 block (adjusted to fit remaining time)"
+        elif kind == "25_5":
+            if walking_suitable:
+                timer_label = "walking-suitable 25/5 block"
+            else:
+                timer_label = "25/5 block"
+        elif kind == "50_10":
             timer_label = "focused 50/10 block"
         else:
             display_kind = kind.replace("_", "/")
