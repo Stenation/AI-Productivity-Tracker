@@ -258,7 +258,8 @@ body {
 .badge-standing,
 .badge-walking,
 .badge-completed,
-.badge-accepted {
+.badge-accepted,
+.badge-focused {
   background: var(--ok-bg);
   color: var(--ok);
   border-color: rgba(63, 185, 80, 0.3);
@@ -277,7 +278,8 @@ body {
 .badge-danger,
 .badge-degraded,
 .badge-interrupted,
-.badge-paused {
+.badge-paused,
+.badge-distracted {
   background: var(--danger-bg);
   color: var(--danger);
   border-color: rgba(248, 81, 73, 0.35);
@@ -285,14 +287,16 @@ body {
 
 .badge-info,
 .badge-running,
-.badge-work {
+.badge-work,
+.badge-rule {
   background: var(--info-bg);
   color: var(--info);
   border-color: rgba(88, 166, 255, 0.35);
 }
 
 .badge-purple,
-.badge-dnd {
+.badge-dnd,
+.badge-ai {
   background: var(--purple-bg);
   color: var(--purple);
   border-color: rgba(188, 140, 255, 0.35);

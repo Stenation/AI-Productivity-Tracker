@@ -222,7 +222,7 @@ neutral_title_patterns:
   - "Google Calendar"
   - "Bitwarden"
   - "1Password"
-  - "KeePass"
+  - "- KeePassXC"
   - "Proton Mail"
   - "Gmail"
   - "Outlook"

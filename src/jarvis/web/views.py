@@ -106,6 +106,43 @@ def format_timer_kind(kind: str | None) -> str:
     return f"{label} Break" if is_break else label
 
 
+def format_classifier_badge(classifier: str | None) -> dict[str, str]:
+    """Format classification source into badge metadata for UI display."""
+    raw = (classifier or "default").strip().lower()
+    if raw == "llm":
+        return {
+            "type": "llm",
+            "label": "AI",
+            "icon": "🤖",
+            "badge_class": "badge-ai",
+            "tooltip": "Classified via local LLM fallback",
+        }
+    if raw in ("rule", "app_class", "title_rule", "desktop", "regex", "color", "explicit"):
+        sub_type = "app rule" if raw == "app_class" else ("title rule" if raw == "title_rule" else raw)
+        return {
+            "type": "rule",
+            "label": "Rule",
+            "icon": "⚡",
+            "badge_class": "badge-rule",
+            "tooltip": f"Deterministic rule ({sub_type})",
+        }
+    if raw in ("calendar_correlation", "calendar_task"):
+        return {
+            "type": "calendar",
+            "label": "Calendar",
+            "icon": "📅",
+            "badge_class": "badge-purple",
+            "tooltip": "Inferred from active calendar event",
+        }
+    return {
+        "type": "default",
+        "label": "Default",
+        "icon": "—",
+        "badge_class": "badge-neutral",
+        "tooltip": "Default fallback classification",
+    }
+
+
 def render_template(
     request: Request,
     template_name: str,
@@ -513,13 +550,17 @@ async def build_focus_context(request: Request) -> dict[str, Any]:
     app_class = summary.get("app_class")
     window_title = summary.get("window_title")
     category = summary.get("focus_state", "unknown")
+    classifier = summary.get("classifier")
     is_call = bool(summary.get("is_call_window", False))
 
-    if not app_class and current_window is not None:
-        app_class = current_window.get("app_class")
-        window_title = current_window.get("window_title")
-        raw_cat = str(current_window.get("category") or "unknown").strip().lower()
-        category = raw_cat
+    if current_window is not None:
+        if not app_class:
+            app_class = current_window.get("app_class")
+            window_title = current_window.get("window_title")
+            raw_cat = str(current_window.get("category") or "unknown").strip().lower()
+            category = raw_cat
+        if not classifier:
+            classifier = current_window.get("classifier")
         meta = current_window.get("metadata")
         if isinstance(meta, dict) and "is_call_window" in meta:
             is_call = bool(meta["is_call_window"])
@@ -550,6 +591,12 @@ async def build_focus_context(request: Request) -> dict[str, Any]:
                 else "Notify"
             ),
             "privacy_paused": privacy_paused,
+            "classifier": classifier if not privacy_paused else None,
+            "classifier_info": (
+                format_classifier_badge(classifier)
+                if not privacy_paused and app_class and app_class != "—"
+                else None
+            ),
             "category_breakdown": category_breakdown,
         }
     }
@@ -756,6 +803,7 @@ async def build_history_context(request: Request) -> dict[str, Any]:
         end_ref = e_dt or now
         dur_sec = max(0, int((end_ref - s_dt).total_seconds())) if s_dt else 0
         cat = str(row.get("category") or "unknown")
+        classifier_raw = row.get("classifier") or "default"
         meta = row.get("metadata")
         is_call = bool(meta.get("is_call_window")) if isinstance(meta, dict) else False
         window_spans.append(
@@ -765,7 +813,8 @@ async def build_history_context(request: Request) -> dict[str, Any]:
                 "window_title": row.get("window_title") or "—",
                 "category": cat,
                 "category_label": cat.capitalize(),
-                "classifier": row.get("classifier") or "default",
+                "classifier": classifier_raw,
+                "classifier_info": format_classifier_badge(classifier_raw),
                 "calendar_event_id": row.get("calendar_event_id") or "—",
                 "started_display": format_timestamp(s_dt),
                 "ended_display": format_timestamp(e_dt) if e_dt else "Active now",

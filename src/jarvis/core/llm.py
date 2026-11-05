@@ -1086,16 +1086,21 @@ async def classify_window_with_llm(
     effective_client = client or OllamaClient(model=effective_model)
     own_client = client is None
 
+    cal_line = (
+        f"Active Calendar Task: {calendar_task_type.strip()}\n"
+        if calendar_task_type and calendar_task_type.strip() and calendar_task_type.strip().lower() != "none"
+        else ""
+    )
+
     prompt = (
-        "Classify the following active window into exactly one category from: "
-        "[focused, neutral, distracted].\n"
-        f"Application: {clean_app or 'Unknown'}\n"
-        f"Window Title: {clean_title or 'None'}\n"
-        f"Current Calendar Task: {calendar_task_type or 'None'}\n\n"
-        "Guidance:\n"
-        "- 'focused': Productive work, coding, bachelor thesis / academic research, writing, studying, debugging, technical docs, design, professional tools.\n"
-        "- 'distracted': Social media browsing, gaming, entertaining video streaming, casual reading, memes, entertainment.\n"
-        "- 'neutral': System settings, file managers, calculators, calendar views, password managers, desktop utilities, email triage."
+        "Classify this window into exactly one category: [focused, neutral, distracted].\n"
+        f"App: {clean_app or 'Unknown'}\n"
+        f"Title: {clean_title or 'None'}\n"
+        f"{cal_line}\n"
+        "Rules:\n"
+        "- focused: Work, software development, academic study/research, technical documentation, professional tools.\n"
+        "- distracted: Gaming, browser games, app stores, shopping, social media, entertainment streaming, memes.\n"
+        "- neutral: System utilities, audio/display controls, settings, file managers, desktop tools."
     )
 
     messages = [

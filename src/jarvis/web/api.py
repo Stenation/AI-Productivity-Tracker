@@ -88,7 +88,11 @@ class RecommendationResolutionRequest(BaseModel):
     reason: str | None = None
     snooze_minutes: int | None = Field(default=None, ge=1)
 
-    def to_metadata(self, *, include_snooze: bool = False) -> dict[str, Any] | None:
+    def to_metadata(
+        self,
+        *,
+        include_snooze: bool = False,
+    ) -> dict[str, Any] | None:
         merged: dict[str, Any] = dict(self.metadata) if self.metadata else {}
         if self.reason is not None:
             merged["reason"] = self.reason

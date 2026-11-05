@@ -133,10 +133,17 @@
                 <td class="mono"><strong>{{ w.app_class }}</strong></td>
                 <td class="text-truncate muted" style="max-width: 260px;" title="{{ w.window_title }}">{{ w.window_title }}</td>
                 <td>
-                  <span class="badge badge-{{ w.category }}">{{ w.category_label }}</span>
-                  {% if w.is_call_window %}
-                    <span class="badge badge-warn">Call</span>
-                  {% endif %}
+                  <div style="display: inline-flex; gap: 0.35rem; align-items: center; flex-wrap: wrap;">
+                    <span class="badge badge-{{ w.category }}">{{ w.category_label }}</span>
+                    {% if w.is_call_window %}
+                      <span class="badge badge-warn">Call</span>
+                    {% endif %}
+                    {% if w.classifier_info %}
+                      <span class="badge {{ w.classifier_info.badge_class }}" title="{{ w.classifier_info.tooltip }}">
+                        {{ w.classifier_info.icon }} {{ w.classifier_info.label }}
+                      </span>
+                    {% endif %}
+                  </div>
                 </td>
                 <td class="mono">
                   {% if w.calendar_event_id and w.calendar_event_id != "—" %}

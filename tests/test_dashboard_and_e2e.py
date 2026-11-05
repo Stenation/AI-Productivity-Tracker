@@ -1397,3 +1397,31 @@ async def test_failure_isolation_across_optional_modules(tmp_path: Path) -> None
                 await _wait_until(lambda: len(_read_notify_log(notify_log)) >= 1)
                 notifications = _read_notify_log(notify_log)
                 assert len(notifications) >= 1
+
+
+def test_format_classifier_badge() -> None:
+    """Verify format_classifier_badge maps classifier sources to badge metadata."""
+    from jarvis.web.views import format_classifier_badge
+
+    ai_badge = format_classifier_badge("llm")
+    assert ai_badge["type"] == "llm"
+    assert ai_badge["label"] == "AI"
+    assert ai_badge["icon"] == "🤖"
+    assert ai_badge["badge_class"] == "badge-ai"
+
+    rule_badge = format_classifier_badge("app_class")
+    assert rule_badge["type"] == "rule"
+    assert rule_badge["label"] == "Rule"
+    assert rule_badge["icon"] == "⚡"
+    assert rule_badge["badge_class"] == "badge-rule"
+
+    cal_badge = format_classifier_badge("calendar_correlation")
+    assert cal_badge["type"] == "calendar"
+    assert cal_badge["label"] == "Calendar"
+    assert cal_badge["icon"] == "📅"
+
+    def_badge = format_classifier_badge("default")
+    assert def_badge["type"] == "default"
+    assert def_badge["label"] == "Default"
+    assert def_badge["badge_class"] == "badge-neutral"
+

@@ -9,6 +9,11 @@
       <span class="badge badge-paused">PAUSED</span>
     {% else %}
       <span class="badge badge-{{ focus_card.category }}">{{ focus_card.category_label }}</span>
+      {% if focus_card.classifier_info and focus_card.classifier_info.type != "default" %}
+        <span class="badge {{ focus_card.classifier_info.badge_class }}" title="{{ focus_card.classifier_info.tooltip }}">
+          {{ focus_card.classifier_info.icon }} {{ focus_card.classifier_info.label }}
+        </span>
+      {% endif %}
     {% endif %}
   </div>
 </div>
