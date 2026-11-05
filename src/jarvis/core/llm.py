@@ -525,12 +525,25 @@ class OllamaClient:
         *,
         model: str | None = None,
         system_prompt: str | None = None,
+        language: str | None = None,
     ) -> dict[str, Any]:
         """Ask a question given a platform context snapshot."""
         ctx_str = json.dumps(context or {}, indent=2)
+        lang_directive = (
+            "- Language consistency: Always respond in the same language as the user's question "
+            "(e.g. formulate the answer in natural German if the question is in German, or in English "
+            "if the question is in English). Preserve calendar event titles, proper nouns, and app names "
+            "in their original language.\n"
+        )
+        if language == "de":
+            lang_directive += "- Explicit user language: German ('de'). Answer in fluent, natural German.\n"
+        elif language == "en":
+            lang_directive += "- Explicit user language: English ('en'). Answer in fluent English.\n"
+
         sys_prompt = system_prompt or (
             "You are Jarvis, a local posture, focus, and calendar assistant for Arch Linux.\n"
             "Answer the user's question accurately and concisely based on the context.\n"
+            f"{lang_directive}"
             "Safety boundary: You may only answer questions and optionally suggest an action via "
             "'suggested_action' (e.g., 'start_timer', 'stand_up', 'take_break', or null). "
             "You must NEVER attempt to execute shell commands, directly change posture state, "

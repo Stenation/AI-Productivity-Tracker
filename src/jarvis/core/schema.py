@@ -283,6 +283,7 @@ class AskRequest(BaseModel):
     question: str
     source: Literal["dashboard", "voice"] | str = "dashboard"
     speak: bool = False
+    language: str | None = None
 
 
 class AskResponse(BaseModel):

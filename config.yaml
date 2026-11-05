@@ -180,13 +180,14 @@ voice:
   ptt_audio_file: "/dev/shm/jarvis_ptt.wav"
   max_duration_seconds: 30.0
   recorder_binary: "pw-record"
-  model_size: "base.en"
+  model_size: "base"
   device: "cpu"
   compute_type: "int8"
   api_url: "http://127.0.0.1:8000"
 
 tts:
   voice_model_path: "~/.local/share/posture-platform/voices/en_US-lessac-medium.onnx"
+  german_voice_model_path: "~/.local/share/posture-platform/voices/de_DE-thorsten-medium.onnx"
   config_path: null
   piper_binary: null
   player_binary: "pw-play"
