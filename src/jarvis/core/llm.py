@@ -7,6 +7,7 @@ import json
 import logging
 import re
 import time
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from datetime import time as dt_time
 from typing import Any
@@ -697,6 +698,102 @@ async def build_assistant_context(
     }
 
 
+@dataclass
+class ConversationSession:
+    """Ephemeral conversation session holding rolling turns and last activity timestamp."""
+
+    session_id: str
+    last_activity: float
+    turns: list[dict[str, str]] = field(default_factory=list)
+
+
+class ConversationSessionManager:
+    """Manages short-lived conversation sessions with sliding TTL, turn caps, and fresh contexts."""
+
+    def __init__(
+        self,
+        ttl_seconds: float = 60.0,
+        max_turns: int = 5,
+    ) -> None:
+        self.ttl_seconds = float(ttl_seconds)
+        self.max_turns = int(max_turns)
+        self._sessions: dict[str, ConversationSession] = {}
+
+    def get_history(self, session_id: str, *, now: float | None = None) -> list[dict[str, str]]:
+        """Return history for session_id if active and within TTL, else empty list."""
+        if self.ttl_seconds <= 0 or not session_id:
+            return []
+        current_time = now if now is not None else time.time()
+        session = self._sessions.get(session_id)
+        if session is None:
+            return []
+        if (current_time - session.last_activity) > self.ttl_seconds:
+            del self._sessions[session_id]
+            return []
+        return [dict(turn) for turn in session.turns]
+
+    def record_turn(
+        self,
+        session_id: str,
+        question: str,
+        response: dict[str, Any],
+        *,
+        now: float | None = None,
+    ) -> None:
+        """Record completed user question and assistant response into session history."""
+        if self.ttl_seconds <= 0 or not session_id:
+            return
+        current_time = now if now is not None else time.time()
+        session = self._sessions.get(session_id)
+        if session is None or (current_time - session.last_activity) > self.ttl_seconds:
+            session = ConversationSession(session_id=session_id, last_activity=current_time)
+            self._sessions[session_id] = session
+
+        session.last_activity = current_time
+
+        assistant_content = json.dumps(
+            {
+                "answer": response.get("answer", ""),
+                "suggested_action": response.get("suggested_action"),
+                "confidence": response.get("confidence", 1.0),
+            },
+            ensure_ascii=False,
+        )
+
+        session.turns.append({"role": "user", "content": question})
+        session.turns.append({"role": "assistant", "content": assistant_content})
+
+        max_messages = self.max_turns * 2
+        if len(session.turns) > max_messages:
+            session.turns = session.turns[-max_messages:]
+
+    def clear_session(self, session_id: str) -> bool:
+        """Clear active session for session_id, returning True if existed."""
+        return self._sessions.pop(session_id, None) is not None
+
+    def clear_all(self) -> None:
+        """Clear all active sessions."""
+        self._sessions.clear()
+
+    def get_session(
+        self,
+        session_id: str,
+        *,
+        now: float | None = None,
+    ) -> ConversationSession | None:
+        """Return the active session if not expired."""
+        if not session_id:
+            return None
+        current_time = now if now is not None else time.time()
+        session = self._sessions.get(session_id)
+        if session is None:
+            return None
+        if self.ttl_seconds > 0 and (current_time - session.last_activity) > self.ttl_seconds:
+            del self._sessions[session_id]
+            return None
+        return session
+
+
 class OllamaClient:
     """Async client communicating with local Ollama daemon at /api/chat."""
 
@@ -821,6 +918,7 @@ class OllamaClient:
         model: str | None = None,
         system_prompt: str | None = None,
         language: str | None = None,
+        history: list[dict[str, str]] | None = None,
     ) -> dict[str, Any]:
         """Ask a question given a platform context snapshot."""
         prompt_ctx = copy.deepcopy(context or {})
@@ -943,10 +1041,12 @@ class OllamaClient:
             f"Current platform context:\n{ctx_str}"
         )
 
-        messages = [
+        messages: list[dict[str, str]] = [
             {"role": "system", "content": sys_prompt},
-            {"role": "user", "content": question},
         ]
+        if history:
+            messages.extend(history)
+        messages.append({"role": "user", "content": question})
 
         return await self.chat(messages, model=model)
 

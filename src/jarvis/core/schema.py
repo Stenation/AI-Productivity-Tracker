@@ -294,6 +294,8 @@ class AskRequest(BaseModel):
     source: Literal["dashboard", "voice"] | str = "dashboard"
     speak: bool = False
     language: str | None = None
+    session_id: str | None = None
+    reset_session: bool = False
 
 
 class AskResponse(BaseModel):
@@ -307,6 +309,7 @@ class AskResponse(BaseModel):
     model: str
     interaction_id: int | None = None
     latency_ms: int | None = None
+    session_id: str | None = None
 
 
 class LlmInteraction(BaseModel):

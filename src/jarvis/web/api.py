@@ -1352,6 +1352,8 @@ async def ask_assistant(
             source=payload.source,
             speak=payload.speak,
             language=getattr(payload, "language", None),
+            session_id=getattr(payload, "session_id", None),
+            reset_session=getattr(payload, "reset_session", False),
             resolver=resolver,
             timer_manager=_get_timer_manager(request),
             settings=settings,
@@ -1435,7 +1437,34 @@ async def ask_assistant(
         model=result["model"],
         interaction_id=result.get("interaction_id", 0),
         latency_ms=result.get("latency_ms"),
+        session_id=result.get("session_id"),
     ).model_dump(mode="json")
+
+
+@router.delete("/ask/session/{session_id}")
+async def reset_session_endpoint(
+    request: Request,
+    session_id: str,
+) -> dict[str, Any]:
+    """Reset an active conversation session (e.g. 'voice' or custom session ID)."""
+    registry = _get_registry(request)
+    llm_mod = registry.get_module("llm_ollama")
+    cleared = False
+    if llm_mod is not None and hasattr(llm_mod, "session_manager"):
+        cleared = llm_mod.session_manager.clear_session(session_id)
+    return {"session_id": session_id, "cleared": cleared}
+
+
+@router.delete("/ask/session")
+async def reset_all_sessions_endpoint(
+    request: Request,
+) -> dict[str, Any]:
+    """Reset all active conversation sessions."""
+    registry = _get_registry(request)
+    llm_mod = registry.get_module("llm_ollama")
+    if llm_mod is not None and hasattr(llm_mod, "session_manager"):
+        llm_mod.session_manager.clear_all()
+    return {"cleared_all": True}
 
 
 @router.get("/ask/history")

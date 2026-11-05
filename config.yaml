@@ -167,11 +167,15 @@ llm:
   keep_alive_minutes: 5
   timeout_seconds: 30.0
   enable_classification_fallback: false
+  session_ttl_seconds: 60.0
+  session_max_turns: 5
 
 voice:
   ptt_state_file: "/dev/shm/jarvis_ptt.json"
   ptt_audio_file: "/dev/shm/jarvis_ptt.wav"
   max_duration_seconds: 30.0
+  session_ttl_seconds: 60.0
+  session_max_turns: 5
   recorder_binary: "pw-record"
   model_size: "base"
   device: "cpu"

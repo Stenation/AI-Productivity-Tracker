@@ -465,6 +465,8 @@ class LlmSettings(BaseModel):
     timeout_seconds: float = Field(default=30.0, gt=0)
     enable_classification_fallback: bool = False
     enable_window_classification_fallback: bool = False
+    session_ttl_seconds: float = Field(default=60.0, ge=0.0)
+    session_max_turns: int = Field(default=5, ge=1)
 
 
 class WaybarSettings(BaseModel):
@@ -502,6 +504,8 @@ class VoiceSettings(BaseModel):
     compute_type: str = "int8"
     api_url: str = "http://127.0.0.1:8000"
     model_path: Path | None = None
+    session_ttl_seconds: float = Field(default=60.0, ge=0.0)
+    session_max_turns: int = Field(default=5, ge=1)
 
     @field_validator("ptt_state_file", "ptt_audio_file", mode="before")
     @classmethod

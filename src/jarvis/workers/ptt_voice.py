@@ -87,6 +87,7 @@ class AskApiClient(Protocol):
         source: str = "voice",
         speak: bool = True,
         language: str | None = None,
+        session_id: str | None = None,
     ) -> dict[str, Any]:
         """Send transcript to POST /api/ask."""
         ...
@@ -267,11 +268,14 @@ class HttpAskClient:
         source: str = "voice",
         speak: bool = True,
         language: str | None = None,
+        session_id: str | None = None,
     ) -> dict[str, Any]:
         url = f"{self.api_url}/api/ask"
         req_data: dict[str, Any] = {"question": question, "source": source, "speak": speak}
         if language:
             req_data["language"] = language
+        if session_id:
+            req_data["session_id"] = session_id
         payload = json.dumps(req_data).encode("utf-8")
         req = urllib.request.Request(
             url,

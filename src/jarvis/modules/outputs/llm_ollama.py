@@ -9,6 +9,7 @@ from typing import Any
 from jarvis.core.bus import EventBus
 from jarvis.core.database import Database
 from jarvis.core.llm import (
+    ConversationSessionManager,
     LlmConnectionError,
     LlmError,
     LlmTimeoutError,
@@ -57,6 +58,22 @@ class LlmOllamaModule(BaseModule):
             )
         else:
             self.client = self._client
+
+        voice_cfg = config.get("voice", {})
+        session_ttl = float(
+            llm_cfg.get("session_ttl_seconds")
+            or voice_cfg.get("session_ttl_seconds")
+            or 60.0
+        )
+        session_max_turns = int(
+            llm_cfg.get("session_max_turns")
+            or voice_cfg.get("session_max_turns")
+            or 5
+        )
+        self.session_manager = ConversationSessionManager(
+            ttl_seconds=session_ttl,
+            max_turns=session_max_turns,
+        )
 
     @classmethod
     def is_available(cls) -> bool:
@@ -122,10 +139,33 @@ class LlmOllamaModule(BaseModule):
         timer_manager: Any = None,
         settings: Settings | None = None,
         registry: Any = None,
+        session_id: str | None = None,
+        reset_session: bool = False,
     ) -> dict[str, Any]:
         """Ask a question, persist successful interaction, emit events, and return result."""
         if not self._running:
             raise LlmError("Module 'llm_ollama' is disabled. Enable llm_ollama in Settings.")
+
+        # Determine effective session ID
+        effective_session_id = session_id
+        if effective_session_id is None and source == "voice":
+            effective_session_id = "voice"
+
+        # Dynamically sync TTL and turn limits from settings if provided
+        if settings is not None:
+            if source == "voice" and hasattr(settings, "voice"):
+                self.session_manager.ttl_seconds = float(settings.voice.session_ttl_seconds)
+                self.session_manager.max_turns = int(settings.voice.session_max_turns)
+            elif hasattr(settings, "llm"):
+                self.session_manager.ttl_seconds = float(settings.llm.session_ttl_seconds)
+                self.session_manager.max_turns = int(settings.llm.session_max_turns)
+
+        if reset_session and effective_session_id:
+            self.session_manager.clear_session(effective_session_id)
+
+        history: list[dict[str, str]] = []
+        if effective_session_id and not reset_session:
+            history = self.session_manager.get_history(effective_session_id)
 
         # 1. Build compact snapshot context if not provided
         effective_context = context
@@ -145,6 +185,7 @@ class LlmOllamaModule(BaseModule):
                 question=question,
                 context=effective_context,
                 language=language,
+                history=history,
             )
         except (LlmConnectionError, LlmTimeoutError, LlmValidationError, LlmError) as exc:
             err_str = f"{type(exc).__name__}: {exc}"
@@ -246,6 +287,14 @@ class LlmOllamaModule(BaseModule):
                 )
             )
 
+        # 7. Record turn in active conversation session
+        if effective_session_id:
+            self.session_manager.record_turn(
+                session_id=effective_session_id,
+                question=question,
+                response=res,
+            )
+
         return {
             "answer": res["answer"],
             "suggested_action": res.get("suggested_action"),
@@ -253,4 +302,5 @@ class LlmOllamaModule(BaseModule):
             "model": res["model"],
             "interaction_id": interaction_id,
             "latency_ms": res.get("latency_ms"),
+            "session_id": effective_session_id,
         }

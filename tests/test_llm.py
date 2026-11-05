@@ -19,6 +19,7 @@ from jarvis.core.classification import classify_calendar_event
 from jarvis.core.database import Database
 from jarvis.core.llm import (
     RESPONSE_JSON_SCHEMA,
+    ConversationSessionManager,
     LlmValidationError,
     OllamaClient,
     build_assistant_context,
@@ -1305,3 +1306,183 @@ async def test_calendar_chat_prompt_guidelines_and_doctor_appointment(
     assert "NEVER use zero-padded digit times" in sys_prompt
     assert "um 7 Uhr" in sys_prompt
     assert "at 7 o'clock" in sys_prompt
+
+
+# ---------------------------------------------------------------------------
+# 19. Ephemeral Voice Session Tests (Sliding TTL, Turn Cap, Fresh Context)
+# ---------------------------------------------------------------------------
+
+
+def test_conversation_session_manager_sliding_ttl_and_turn_cap() -> None:
+    """Verify session manager implements sliding TTL, turn capping, and clean expiration."""
+    sm = ConversationSessionManager(ttl_seconds=60.0, max_turns=3)
+
+    # Initial state
+    assert sm.get_history("voice", now=100.0) == []
+
+    # Turn 1 at t=100
+    sm.record_turn(
+        "voice",
+        "What's my next meeting?",
+        {"answer": "Sprint Planning at 10 AM.", "suggested_action": None, "confidence": 0.95},
+        now=100.0,
+    )
+    hist1 = sm.get_history("voice", now=120.0)
+    assert len(hist1) == 2
+    assert hist1[0]["role"] == "user"
+    assert hist1[0]["content"] == "What's my next meeting?"
+    assert hist1[1]["role"] == "assistant"
+    assert "Sprint Planning" in hist1[1]["content"]
+
+    # Turn 2 at t=130 (within sliding TTL of 60s from t=100)
+    sm.record_turn(
+        "voice",
+        "Can I walk during it?",
+        {"answer": "Yes, walking is feasible.", "suggested_action": None, "confidence": 0.9},
+        now=130.0,
+    )
+    hist2 = sm.get_history("voice", now=150.0)
+    assert len(hist2) == 4
+
+    # Sliding TTL check: at t=185 (55s after t=130, but 85s after t=100), session is still active!
+    hist_sliding = sm.get_history("voice", now=185.0)
+    assert len(hist_sliding) == 4
+
+    # Turn 3 at t=185
+    sm.record_turn(
+        "voice",
+        "Set a timer for 10 minutes before.",
+        {"answer": "Timer set.", "suggested_action": "start_timer", "confidence": 0.99},
+        now=185.0,
+    )
+    hist3 = sm.get_history("voice", now=190.0)
+    assert len(hist3) == 6  # 3 turns = 6 messages (at max_turns cap)
+
+    # Turn 4 at t=190 (exceeding max_turns=3 -> oldest turn dropped)
+    sm.record_turn(
+        "voice",
+        "Thanks Jarvis.",
+        {"answer": "You're welcome!", "suggested_action": None, "confidence": 1.0},
+        now=190.0,
+    )
+    hist4 = sm.get_history("voice", now=195.0)
+    assert len(hist4) == 6  # Capped at 3 turns (6 messages)
+    # Turn 1 should be gone:
+    assert hist4[0]["content"] == "Can I walk during it?"
+    assert hist4[-2]["content"] == "Thanks Jarvis."
+
+    # Expiration check: at t=260 (>60s after t=190), session expires
+    hist_expired = sm.get_history("voice", now=260.0)
+    assert hist_expired == []
+
+    # New turn after expiration starts clean session
+    sm.record_turn(
+        "voice",
+        "New question after a while",
+        {"answer": "Fresh answer", "suggested_action": None, "confidence": 0.9},
+        now=265.0,
+    )
+    hist_fresh = sm.get_history("voice", now=270.0)
+    assert len(hist_fresh) == 2
+    assert hist_fresh[0]["content"] == "New question after a while"
+
+    # Explicit clear check
+    assert sm.clear_session("voice") is True
+    assert sm.get_history("voice", now=271.0) == []
+
+
+async def test_voice_ephemeral_session_api_multi_turn_and_fresh_context(
+    llm_test_env: tuple[FastAPI, httpx.AsyncClient, list[dict[str, Any]]],
+) -> None:
+    """Verify POST /api/ask voice sustains temporary sessions with fresh system context."""
+    app, client, captured = llm_test_env
+
+    # Turn 1 (voice)
+    resp1 = await client.post(
+        "/api/ask",
+        json={"question": "What is my next meeting?", "source": "voice"},
+    )
+    assert resp1.status_code == 200
+    data1 = resp1.json()
+    assert data1["session_id"] == "voice"
+    assert len(captured) == 1
+
+    messages_turn1 = captured[0]["body"]["messages"]
+    # Turn 1: System prompt + 1 User prompt
+    assert len(messages_turn1) == 2
+    assert messages_turn1[0]["role"] == "system"
+    assert messages_turn1[1]["role"] == "user"
+    assert messages_turn1[1]["content"] == "What is my next meeting?"
+
+    # Turn 2 (voice follow-up within 60s)
+    resp2 = await client.post(
+        "/api/ask",
+        json={"question": "Can I walk during it?", "source": "voice"},
+    )
+    assert resp2.status_code == 200
+    data2 = resp2.json()
+    assert data2["session_id"] == "voice"
+    assert len(captured) == 2
+
+    messages_turn2 = captured[1]["body"]["messages"]
+    # Turn 2: Fresh System prompt + Turn 1 User + Turn 1 Assistant + Turn 2 User
+    assert len(messages_turn2) == 4
+    assert messages_turn2[0]["role"] == "system"
+    assert "Current platform context:" in messages_turn2[0]["content"]
+    assert messages_turn2[1]["role"] == "user"
+    assert messages_turn2[1]["content"] == "What is my next meeting?"
+    assert messages_turn2[2]["role"] == "assistant"
+    assert messages_turn2[3]["role"] == "user"
+    assert messages_turn2[3]["content"] == "Can I walk during it?"
+
+    # Turn 3: Reset session explicitly via reset_session=True
+    resp3 = await client.post(
+        "/api/ask",
+        json={"question": "Unrelated new question", "source": "voice", "reset_session": True},
+    )
+    assert resp3.status_code == 200
+    assert len(captured) == 3
+
+    messages_turn3 = captured[2]["body"]["messages"]
+    # Reset: Back to Fresh System prompt + 1 User prompt (previous history cleared)
+    assert len(messages_turn3) == 2
+    assert messages_turn3[0]["role"] == "system"
+    assert messages_turn3[1]["role"] == "user"
+    assert messages_turn3[1]["content"] == "Unrelated new question"
+
+
+async def test_reset_session_endpoints(
+    llm_test_env: tuple[FastAPI, httpx.AsyncClient, list[dict[str, Any]]],
+) -> None:
+    """Verify DELETE /api/ask/session/{id} and DELETE /api/ask/session clear sessions."""
+    app, client, captured = llm_test_env
+
+    # Populate a custom session
+    resp1 = await client.post(
+        "/api/ask",
+        json={"question": "Hello", "session_id": "test_sess"},
+    )
+    assert resp1.status_code == 200
+    assert resp1.json()["session_id"] == "test_sess"
+
+    # Follow up within session
+    resp2 = await client.post(
+        "/api/ask",
+        json={"question": "Follow up", "session_id": "test_sess"},
+    )
+    assert resp2.status_code == 200
+    assert len(captured[-1]["body"]["messages"]) == 4
+
+    # Delete the session
+    del_resp = await client.delete("/api/ask/session/test_sess")
+    assert del_resp.status_code == 200
+    assert del_resp.json() == {"session_id": "test_sess", "cleared": True}
+
+    # Next question on same session_id starts clean
+    resp3 = await client.post(
+        "/api/ask",
+        json={"question": "After delete", "session_id": "test_sess"},
+    )
+    assert resp3.status_code == 200
+    assert len(captured[-1]["body"]["messages"]) == 2
+
