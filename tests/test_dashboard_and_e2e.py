@@ -858,7 +858,9 @@ if (!prevented || swapEvent.detail.shouldSwap !== false) process.exit(7);
 
 process.exit(0);
 """
-                    res = subprocess.run([node_bin, "-e", node_script], capture_output=True, text=True)
+                    res = subprocess.run(
+                        [node_bin, "-e", node_script], capture_output=True, text=True
+                    )
                     assert res.returncode == 0, f"Node controller test failed: {res.stderr}"
 
 

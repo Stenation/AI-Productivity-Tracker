@@ -25,7 +25,7 @@ DEFAULT_PTT_AUDIO_FILE = Path("/dev/shm/jarvis_ptt.wav")
 DEFAULT_MAX_RECORDING_DURATION_SECONDS = 30.0
 DEFAULT_RECORDER_BINARY = "pw-record"
 DEFAULT_RECORDER_ARGS = ("--rate", "16000", "--channels", "1")
-DEFAULT_WHISPER_MODEL = "base.en"
+DEFAULT_WHISPER_MODEL = "base"
 DEFAULT_DEVICE = "cpu"
 DEFAULT_COMPUTE_TYPE = "int8"
 DEFAULT_API_URL = "http://127.0.0.1:8000"
@@ -81,7 +81,13 @@ class AudioTranscriber(Protocol):
 class AskApiClient(Protocol):
     """Protocol for interacting with Jarvis HTTP API."""
 
-    def ask(self, question: str, source: str = "voice", speak: bool = True) -> dict[str, Any]:
+    def ask(
+        self,
+        question: str,
+        source: str = "voice",
+        speak: bool = True,
+        language: str | None = None,
+    ) -> dict[str, Any]:
         """Send transcript to POST /api/ask."""
         ...
 
@@ -199,6 +205,7 @@ class FasterWhisperTranscriber:
         self.compute_type = compute_type
         self.download_root = download_root
         self._model: Any = None
+        self.last_language: str | None = None
 
     def _get_model(self) -> Any:
         if self._model is not None:
@@ -227,7 +234,8 @@ class FasterWhisperTranscriber:
             raise TranscriptionError(f"Audio file does not exist: {audio_path}")
         model = self._get_model()
         try:
-            segments, _ = model.transcribe(str(audio_path))
+            segments, info = model.transcribe(str(audio_path))
+            self.last_language = getattr(info, "language", None)
             text = " ".join(s.text.strip() for s in segments if s.text).strip()
             return text
         except Exception as exc:
@@ -253,11 +261,18 @@ class HttpAskClient:
             return None
         return None
 
-    def ask(self, question: str, source: str = "voice", speak: bool = True) -> dict[str, Any]:
+    def ask(
+        self,
+        question: str,
+        source: str = "voice",
+        speak: bool = True,
+        language: str | None = None,
+    ) -> dict[str, Any]:
         url = f"{self.api_url}/api/ask"
-        payload = json.dumps(
-            {"question": question, "source": source, "speak": speak}
-        ).encode("utf-8")
+        req_data: dict[str, Any] = {"question": question, "source": source, "speak": speak}
+        if language:
+            req_data["language"] = language
+        payload = json.dumps(req_data).encode("utf-8")
         req = urllib.request.Request(
             url,
             data=payload,
@@ -429,12 +444,19 @@ class PttVoiceWorker:
                 return {"status": "stopped", "transcript": ""}
 
             transcript = self.transcriber.transcribe(self.audio_file)
+            detected_lang = getattr(self.transcriber, "last_language", None)
             if transcript:
-                logger.info("Transcribed voice request: %s", transcript)
-                response = self.ask_client.ask(transcript, source="voice", speak=True)
+                logger.info("Transcribed voice request (lang=%s): %s", detected_lang, transcript)
+                response = self.ask_client.ask(
+                    transcript,
+                    source="voice",
+                    speak=True,
+                    language=detected_lang,
+                )
                 return {
                     "status": "asked",
                     "transcript": transcript,
+                    "language": detected_lang,
                     "response": response,
                 }
             return {"status": "stopped", "transcript": ""}
@@ -513,6 +535,36 @@ def run_watchdog(
         pass
 
 
+def _send_desktop_notification(
+    summary: str,
+    body: str,
+    urgency: str = "normal",
+    expire_ms: int = 3000,
+) -> None:
+    """Best-effort notification to notify-send for desktop feedback."""
+    try:
+        cmd = [
+            "notify-send",
+            "-a",
+            "Jarvis Voice",
+            "-u",
+            urgency,
+            "-t",
+            str(expire_ms),
+            summary,
+            body,
+        ]
+        subprocess.run(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except Exception:
+        pass
+
+
 def main() -> None:
     """CLI entry point for jarvis-ptt command."""
     parser = argparse.ArgumentParser(description="Jarvis Push-to-Talk Voice Toggle")
@@ -539,14 +591,29 @@ def main() -> None:
     result = worker.toggle()
     status = result.get("status")
     if status == "aborted":
-        print(f"Push-to-talk aborted: {result.get('reason')}", file=sys.stderr)
+        reason = result.get("reason", "Unknown reason")
+        _send_desktop_notification(
+            "Jarvis Voice", f"Aborted: {reason}", urgency="critical", expire_ms=4000
+        )
+        print(f"Push-to-talk aborted: {reason}", file=sys.stderr)
         sys.exit(1)
     elif status == "recording_started":
+        _send_desktop_notification(
+            "Jarvis Voice", "Listening... (Press Super+I again when done)", expire_ms=3500
+        )
         print(f"PTT: recording started (PID {result.get('pid')})")
     elif status == "asked":
-        print(f"PTT: {result.get('transcript')}")
+        transcript = result.get("transcript", "")
+        _send_desktop_notification(
+            "Jarvis Voice", f'Processing: "{transcript}"', expire_ms=3000
+        )
+        print(f"PTT: {transcript}")
     elif status in ("error", "degraded"):
-        print(f"PTT {status}: {result.get('error')}", file=sys.stderr)
+        err = result.get("error", "Unknown error")
+        _send_desktop_notification(
+            "Jarvis Voice", f"Error: {err}", urgency="critical", expire_ms=5000
+        )
+        print(f"PTT {status}: {err}", file=sys.stderr)
         sys.exit(1)
 
 

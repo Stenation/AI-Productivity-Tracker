@@ -88,10 +88,16 @@ class FakeAskClient:
     def get_state(self) -> dict[str, Any] | None:
         return self.state_dict
 
-    def ask(self, question: str, source: str = "voice", speak: bool = True) -> dict[str, Any]:
+    def ask(
+        self,
+        question: str,
+        source: str = "voice",
+        speak: bool = True,
+        language: str | None = None,
+    ) -> dict[str, Any]:
         if self.error:
             raise self.error
-        req = {"question": question, "source": source, "speak": speak}
+        req = {"question": question, "source": source, "speak": speak, "language": language}
         self.questions.append(req)
         return {
             "answer": f"Your next block is Deep Work. (re: {question})",
@@ -602,3 +608,77 @@ def test_hyprland_script_contents() -> None:
     assert "$voiceKeybind = SUPER, V" in content
     assert "bind = $voiceKeybind, exec," in content
     assert "jarvis-ptt" in content
+
+
+# ---------------------------------------------------------------------------
+# Test 14: Bilingual German/English Text Detection & TTS Routing
+# ---------------------------------------------------------------------------
+def test_is_german_text() -> None:
+    from jarvis.modules.outputs.tts_piper import is_german_text
+
+    # German sentences with umlauts
+    assert is_german_text("Dein nächster Termin ist Training.") is True
+    assert is_german_text("Schöne Pause!") is True
+    # German sentence without umlauts (stopwords matching)
+    assert is_german_text("Das ist ein Test für heute.") is True
+    # English sentences
+    assert is_german_text("Your next appointment is Training at 7 PM.") is False
+    assert is_german_text("Start a pomodoro timer for coding.") is False
+
+
+@pytest.mark.asyncio
+async def test_tts_german_voice_routing(db: Database, tmp_path: Path) -> None:
+    bus = EventBus()
+    default_syn = FakeSynthesizer()
+    german_syn = FakeSynthesizer()
+    fake_player = FakePlayer()
+
+    temp_dir = tmp_path / "shm"
+    tts_mod = TtsPiperModule(
+        bus=bus,
+        db=db,
+        config={"allow_tts": True, "global_pause": False, "dnd_mode": False},
+        synthesizer=default_syn,
+        player=fake_player,
+        temp_dir=temp_dir,
+    )
+    # Inject fake German synthesizer
+    tts_mod._german_synthesizer = german_syn
+
+    await tts_mod.start()
+    try:
+        # 1. English request -> default synthesizer
+        await bus.publish(
+            PlatformEvent(
+                type="tts_requested",
+                source="test",
+                payload={"text": "Your next meeting is in ten minutes.", "language": "en"},
+            )
+        )
+        assert len(default_syn.synthesize_calls) == 1
+        assert len(german_syn.synthesize_calls) == 0
+
+        # 2. Explicit German request via language payload -> german synthesizer
+        await bus.publish(
+            PlatformEvent(
+                type="tts_requested",
+                source="test",
+                payload={"text": "Dein nächster Termin ist Training um 19 Uhr.", "language": "de"},
+            )
+        )
+        assert len(default_syn.synthesize_calls) == 1
+        assert len(german_syn.synthesize_calls) == 1
+        assert "Training" in german_syn.synthesize_calls[0][0]
+
+        # 3. Implicit German text without explicit language payload -> routed to german synthesizer
+        await bus.publish(
+            PlatformEvent(
+                type="tts_requested",
+                source="test",
+                payload={"text": "Du sitzt seit 30 Minuten. Zeit für eine Pause."},
+            )
+        )
+        assert len(default_syn.synthesize_calls) == 1
+        assert len(german_syn.synthesize_calls) == 2
+    finally:
+        await tts_mod.stop()

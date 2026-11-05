@@ -531,14 +531,18 @@ class OllamaClient:
         ctx_str = json.dumps(context or {}, indent=2)
         lang_directive = (
             "- Language consistency: Always respond in the same language as the user's question "
-            "(e.g. formulate the answer in natural German if the question is in German, or in English "
-            "if the question is in English). Preserve calendar event titles, proper nouns, and app names "
-            "in their original language.\n"
+            "(e.g. formulate the answer in natural German if the question is in German, "
+            "or in English if the question is in English). Preserve calendar event titles, "
+            "proper nouns, and app names in their original language.\n"
         )
         if language == "de":
-            lang_directive += "- Explicit user language: German ('de'). Answer in fluent, natural German.\n"
+            lang_directive += (
+                "- Explicit user language: German ('de'). Answer in fluent, natural German.\n"
+            )
         elif language == "en":
-            lang_directive += "- Explicit user language: English ('en'). Answer in fluent English.\n"
+            lang_directive += (
+                "- Explicit user language: English ('en'). Answer in fluent English.\n"
+            )
 
         sys_prompt = system_prompt or (
             "You are Jarvis, a local posture, focus, and calendar assistant for Arch Linux.\n"
