@@ -41,6 +41,7 @@ llm = [
 voice = [
     "faster-whisper>=1.1,<2.0",
     "piper-tts>=1.2,<2.0",
+    "av<19",
 ]
 
 [tool.hatch.build.targets.wheel]
