@@ -31,9 +31,7 @@ from jarvis.modules.base import BaseModule
 
 logger = logging.getLogger(__name__)
 
-READONLY_SCOPES: tuple[str, ...] = (
-    "https://www.googleapis.com/auth/calendar.events.readonly",
-)
+READONLY_SCOPES: tuple[str, ...] = ("https://www.googleapis.com/auth/calendar.events.readonly",)
 
 DEFAULT_SYNC_INTERVAL_MINUTES = 15
 DEFAULT_BOUNDARY_CHECK_SECONDS = 60.0
@@ -122,8 +120,7 @@ def run_auth_flow(
     libs = get_google_libraries()
     if libs is None and flow_factory is None:
         raise GoogleLibrariesMissingError(
-            "Google Calendar dependencies are not installed. "
-            "Please run: uv sync --group calendar"
+            "Google Calendar dependencies are not installed. Please run: uv sync --group calendar"
         )
 
     if not cred_p.exists() and flow_factory is None:
@@ -286,9 +283,7 @@ class GoogleCalendarModule(BaseModule):
     async def health(self) -> dict[str, Any]:
         """Return module health payload."""
         status = (
-            "degraded"
-            if self._last_error is not None
-            else ("ok" if self._running else "disabled")
+            "degraded" if self._last_error is not None else ("ok" if self._running else "disabled")
         )
         return {
             "module": self.name,
@@ -312,8 +307,12 @@ class GoogleCalendarModule(BaseModule):
             logger.debug("%s: Sync skipped due to privacy.global_pause", self.name)
             return []
 
-        time_min = ref_now - timedelta(hours=1)
-        time_max = ref_now + timedelta(hours=24)
+        start_of_today = datetime.combine(ref_now.date(), time.min, tzinfo=ref_now.tzinfo)
+        end_of_today = datetime.combine(
+            ref_now.date() + timedelta(days=1), time.min, tzinfo=ref_now.tzinfo
+        )
+        time_min = min(ref_now - timedelta(hours=1), start_of_today)
+        time_max = max(ref_now + timedelta(hours=24), end_of_today)
 
         all_items: list[dict[str, Any]] = []
         cal_tz_name: str | None = None
@@ -623,10 +622,7 @@ class GoogleCalendarModule(BaseModule):
         return local_tz if local_tz is not None else UTC
 
     def _get_classification_settings(self) -> Any:
-        return (
-            self.config.get("classification")
-            or self.config.get("calendar_classification")
-        )
+        return self.config.get("classification") or self.config.get("calendar_classification")
 
     def _get_pomodoro_settings(self) -> Any:
         return self.config.get("pomodoro")

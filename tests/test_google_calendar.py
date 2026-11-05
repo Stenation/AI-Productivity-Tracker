@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -92,11 +93,13 @@ def test_auth_cli_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
         def run_local_server(self, port: int = 0, open_browser: bool = True) -> Any:
             mock_creds = MagicMock()
-            mock_creds.to_json.return_value = json.dumps({
-                "token": "fake_access_token",
-                "refresh_token": "fake_refresh_token",
-                "scopes": self.scopes,
-            })
+            mock_creds.to_json.return_value = json.dumps(
+                {
+                    "token": "fake_access_token",
+                    "refresh_token": "fake_refresh_token",
+                    "scopes": self.scopes,
+                }
+            )
             return mock_creds
 
     # Run auth flow with flow_factory
@@ -743,3 +746,33 @@ async def test_registry_integration_lifecycle(
     # Clean shutdown
     await registry.stop_all()
     assert registry.is_enabled("google_calendar") is False
+
+
+@pytest.mark.parametrize(
+    ("cmd", "expected_output"),
+    [
+        ([sys.executable, "-c", "import jarvis.modules.base"], ""),
+        ([sys.executable, "-c", "import jarvis.core.bus"], ""),
+        ([sys.executable, "-c", "import jarvis.core.app"], ""),
+        (
+            [sys.executable, "-m", "jarvis.modules.inputs.google_calendar", "--help"],
+            "Posture Platform Google Calendar OAuth setup utility",
+        ),
+    ],
+)
+def test_import_cycle_and_cli_help_in_fresh_subprocesses(
+    cmd: list[str],
+    expected_output: str,
+) -> None:
+    """Ensure lightweight core/module imports and CLI execution without circular import errors."""
+    import subprocess
+
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, f"Command {cmd} failed with stderr:\n{result.stderr}"
+    if expected_output:
+        assert expected_output in result.stdout

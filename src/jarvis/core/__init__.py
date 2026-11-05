@@ -1,10 +1,10 @@
 """Core infrastructure for the Posture Platform."""
 
-from jarvis.core.app import create_app
+from typing import TYPE_CHECKING, Any
+
 from jarvis.core.bus import EventBus
 from jarvis.core.database import Database
 from jarvis.core.migrations import apply_migrations, get_applied_migrations, run_migrations
-from jarvis.core.registry import ModuleRegistry
 from jarvis.core.resolver import StateResolver
 from jarvis.core.schema import (
     MANUAL_ACTIVITY_CYCLE,
@@ -34,6 +34,23 @@ from jarvis.core.settings import (
     load_settings,
 )
 from jarvis.core.timer import TimerManager
+
+if TYPE_CHECKING:
+    from jarvis.core.app import create_app
+    from jarvis.core.registry import ModuleRegistry
+
+
+def __getattr__(name: str) -> Any:
+    if name == "create_app":
+        from jarvis.core.app import create_app
+
+        return create_app
+    if name == "ModuleRegistry":
+        from jarvis.core.registry import ModuleRegistry
+
+        return ModuleRegistry
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 __all__ = [
     "DEFAULT_CONFIG_PATH",
