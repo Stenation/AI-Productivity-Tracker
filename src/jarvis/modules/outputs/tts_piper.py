@@ -18,8 +18,25 @@ from jarvis.modules.base import BaseModule
 logger = logging.getLogger(__name__)
 
 DEFAULT_VOICE_MODEL_PATH = Path("~/.local/share/posture-platform/voices/en_US-lessac-medium.onnx")
+DEFAULT_GERMAN_VOICE_MODEL_PATH = Path("~/.local/share/posture-platform/voices/de_DE-thorsten-medium.onnx")
 DEFAULT_PLAYER_BINARY = "pw-play"
 DEFAULT_TEMP_DIR = Path("/dev/shm")
+
+
+def is_german_text(text: str) -> bool:
+    """Fast heuristic to detect German language text for TTS synthesis."""
+    if any(ch in text for ch in "äöüÄÖÜß"):
+        return True
+    de_words = {
+        "und", "der", "die", "das", "ist", "nicht", "ein", "eine", "einer", "einem",
+        "einen", "im", "in", "am", "an", "von", "zu", "mit", "für", "auf", "dem",
+        "den", "des", "termin", "termine", "uhr", "heute", "morgen", "keine", "hast",
+        "habe", "bist", "dein", "deine", "deinen", "deinem", "deiner", "mein", "meine",
+        "jetzt", "zeit", "pause", "arbeiten", "arbeit", "minuten", "stunden", "hallo",
+        "stehen", "woche", "tag", "tage", "wichtig", "kalender"
+    }
+    words = {w.strip(".,!?:;\"'()[]{}").lower() for w in text.split()}
+    return len(words & de_words) >= 2
 
 
 class TtsError(Exception):
@@ -366,6 +383,24 @@ class TtsPiperModule(BaseModule):
             speaker_id=speaker_id,
             length_scale=length_scale,
         )
+
+        german_model_raw = (
+            self.config.get("german_voice_model_path")
+            or tts_cfg.get("german_voice_model_path")
+            or DEFAULT_GERMAN_VOICE_MODEL_PATH
+        )
+        self._german_model_path = Path(str(german_model_raw)).expanduser()
+        if self._german_model_path.exists():
+            self._german_synthesizer: SpeechSynthesizer | None = AutoPiperSynthesizer(
+                model_path=self._german_model_path,
+                config_path=None,
+                piper_binary=piper_bin,
+                speaker_id=None,
+                length_scale=length_scale,
+            )
+        else:
+            self._german_synthesizer = None
+
         self._player = player or PipeWirePlayer(binary=player_bin)
 
         privacy_cfg = self.config.get("privacy", {})
@@ -472,8 +507,17 @@ class TtsPiperModule(BaseModule):
         self._temp_dir.mkdir(parents=True, exist_ok=True)
         temp_wav = self._temp_dir / f"jarvis_tts_{uuid.uuid4().hex[:8]}.wav"
 
+        lang = str(event.payload.get("language") or "").strip().lower()
+        use_german = (lang.startswith("de")) or (not lang and is_german_text(text))
+
+        synthesizer = (
+            self._german_synthesizer
+            if use_german and self._german_synthesizer is not None
+            else self._synthesizer
+        )
+
         try:
-            await self._synthesizer.synthesize(text, temp_wav)
+            await synthesizer.synthesize(text, temp_wav)
             await self._player.play(temp_wav)
             self._last_error = None
         except Exception as exc:
