@@ -443,7 +443,7 @@ class VoiceSettings(BaseModel):
     ptt_audio_file: Path = Path("/dev/shm/jarvis_ptt.wav")
     max_duration_seconds: float = Field(default=30.0, gt=0)
     recorder_binary: str = "pw-record"
-    model_size: str = "base.en"
+    model_size: str = "base"
     device: str = "cpu"
     compute_type: str = "int8"
     api_url: str = "http://127.0.0.1:8000"
@@ -466,6 +466,9 @@ class TtsSettings(BaseModel):
     voice_model_path: Path = Path(
         "~/.local/share/posture-platform/voices/en_US-lessac-medium.onnx"
     )
+    german_voice_model_path: Path | None = Path(
+        "~/.local/share/posture-platform/voices/de_DE-thorsten-medium.onnx"
+    )
     config_path: Path | None = None
     piper_binary: str | None = None
     player_binary: str = "pw-play"
@@ -480,7 +483,7 @@ class TtsSettings(BaseModel):
     def _validate_path(cls, value: Path | str) -> Path:
         return _expand_path(value)
 
-    @field_validator("config_path", mode="before")
+    @field_validator("config_path", "german_voice_model_path", mode="before")
     @classmethod
     def _validate_optional_path(cls, value: Path | str | None) -> Path | None:
         return _expand_optional_path(value)
