@@ -16,11 +16,16 @@ from typing import Any
 from jarvis.core.bus import EventBus
 from jarvis.core.classification import (
     DEFAULT_DISTRACTION_TITLE_PATTERNS,
+    DEFAULT_NEUTRAL_TITLE_PATTERNS,
     DEFAULT_WORK_APP_CLASSES,
+    DEFAULT_WORK_TITLE_PATTERNS,
+    VALID_FOCUS_CATEGORIES,
     WindowClassificationResult,
+    _WINDOW_LLM_CACHE,
     classify_window,
 )
 from jarvis.core.database import Database
+from jarvis.core.llm import classify_window_with_llm
 from jarvis.core.schema import PlatformEvent, ensure_aware, now_local
 from jarvis.modules.base import BaseModule
 
@@ -162,6 +167,7 @@ class HyprlandIpcModule(BaseModule):
         subprocess_timeout_seconds: float = DEFAULT_HYPRCTL_TIMEOUT_SECONDS,
         env: Mapping[str, str] | None = None,
         clock: Callable[[], datetime] | None = None,
+        llm_classifier: Callable[..., Any] | None = None,
     ) -> None:
         super().__init__(bus=bus, db=db, config=dict(config) if config else {})
         if idle_threshold_seconds is not None and idle_threshold_seconds < 0:
@@ -211,6 +217,10 @@ class HyprlandIpcModule(BaseModule):
         self._socket_task: asyncio.Task[None] | None = None
         self._idle_timer_task: asyncio.Task[None] | None = None
         self._idle_monitor_task: asyncio.Task[None] | None = None
+        self._llm_classify_task: asyncio.Task[None] | None = None
+        self._llm_classifier: Callable[..., Any] | None = llm_classifier or (
+            config.get("llm_classifier") if config else None
+        )
 
         self._running: bool = False
         self._last_event_at: datetime | None = None
@@ -399,6 +409,20 @@ class HyprlandIpcModule(BaseModule):
             return [str(item) for item in raw]
         return list(DEFAULT_DISTRACTION_TITLE_PATTERNS)
 
+    def work_title_patterns(self) -> list[str]:
+        """Return configured productive window title patterns."""
+        raw = self._get_config_value("work_title_patterns")
+        if isinstance(raw, Sequence) and not isinstance(raw, (str, bytes)):
+            return [str(item) for item in raw]
+        return list(DEFAULT_WORK_TITLE_PATTERNS)
+
+    def neutral_title_patterns(self) -> list[str]:
+        """Return configured neutral window title patterns."""
+        raw = self._get_config_value("neutral_title_patterns")
+        if isinstance(raw, Sequence) and not isinstance(raw, (str, bytes)):
+            return [str(item) for item in raw]
+        return list(DEFAULT_NEUTRAL_TITLE_PATTERNS)
+
     def _get_optional_str_list(self, key: str) -> list[str] | None:
         raw = self._get_config_value(key)
         if raw is not None and isinstance(raw, Sequence) and not isinstance(raw, (str, bytes)):
@@ -437,8 +461,8 @@ class HyprlandIpcModule(BaseModule):
             distraction_title_patterns=self.distraction_title_patterns(),
             distraction_app_classes=distraction_classes,
             neutral_app_classes=neutral_classes,
-            work_title_patterns=work_titles,
-            neutral_title_patterns=neutral_titles,
+            work_title_patterns=work_titles if work_titles is not None else self.work_title_patterns(),
+            neutral_title_patterns=neutral_titles if neutral_titles is not None else self.neutral_title_patterns(),
             call_app_classes=call_apps,
             call_title_patterns=call_titles,
             app_class_rules=app_rules,
@@ -557,6 +581,12 @@ class HyprlandIpcModule(BaseModule):
                     confidence=0.0,
                 )
 
+            if classification.category == "unknown":
+                clean_pair = (app_class.strip().lower(), window_title.strip().lower())
+                cached = _WINDOW_LLM_CACHE.get(clean_pair)
+                if cached is not None:
+                    classification = cached
+
             # Empty / desktop focus: close open window span without inserting a blank row
             if not app_class.strip() and not window_title.strip():
                 if self._db_connected():
@@ -634,7 +664,140 @@ class HyprlandIpcModule(BaseModule):
                     },
                 )
             )
+
+            if category == "unknown" and self._is_llm_fallback_enabled():
+                if self._llm_classify_task is not None and not self._llm_classify_task.done():
+                    self._llm_classify_task.cancel()
+                self._llm_classify_task = asyncio.create_task(
+                    self._debounce_and_classify_llm(
+                        span_id=span_id,
+                        app_class=app_class,
+                        window_title=window_title,
+                        calendar_task_type=calendar_task_type,
+                    ),
+                    name=f"{self.name}_llm_classify_{span_id}",
+                )
+
             return span_row
+
+    def _is_llm_fallback_enabled(self) -> bool:
+        if self._llm_classifier is not None:
+            return True
+        val = self._get_config_value("enable_llm_fallback")
+        if val is True:
+            return True
+        val2 = self._get_config_value("enable_window_classification_fallback")
+        if val2 is True:
+            return True
+        focus_cfg = self.config.get("focus")
+        if isinstance(focus_cfg, Mapping):
+            if focus_cfg.get("enable_llm_fallback") is True:
+                return True
+        return False
+
+    async def _debounce_and_classify_llm(
+        self,
+        span_id: int | None,
+        app_class: str,
+        window_title: str,
+        calendar_task_type: str | None,
+    ) -> None:
+        min_dwell = float(self._get_config_value("llm_min_dwell_seconds") or 3.0)
+        try:
+            await asyncio.sleep(min_dwell)
+        except asyncio.CancelledError:
+            return
+
+        if not self._running:
+            return
+
+        pair = (app_class, window_title)
+        clean_pair = (app_class.strip().lower(), window_title.strip().lower())
+
+        if self._last_window != pair:
+            return
+
+        res: dict[str, Any] | None = None
+        if self._llm_classifier is not None:
+            try:
+                if inspect.iscoroutinefunction(self._llm_classifier):
+                    res = await self._llm_classifier(
+                        app_class=app_class,
+                        window_title=window_title,
+                        calendar_task_type=calendar_task_type,
+                    )
+                else:
+                    res = self._llm_classifier(
+                        app_class=app_class,
+                        window_title=window_title,
+                        calendar_task_type=calendar_task_type,
+                    )
+            except Exception as exc:
+                logger.warning("Custom window LLM classifier error: %s", exc)
+        else:
+            try:
+                model_name = self._get_config_value("llm_model") or self._get_config_value("text_model")
+                res = await classify_window_with_llm(
+                    app_class=app_class,
+                    window_title=window_title,
+                    calendar_task_type=calendar_task_type,
+                    model=model_name,
+                )
+            except Exception as exc:
+                logger.warning("classify_window_with_llm error: %s", exc)
+
+        if res and isinstance(res, Mapping) and res.get("category"):
+            cat = str(res["category"]).strip().lower()
+            conf = float(res.get("confidence", 0.8))
+            if cat in VALID_FOCUS_CATEGORIES and cat != "unknown":
+                logger.info(
+                    "LLM classified window %r / %r -> %s (confidence=%.2f, reason: %s)",
+                    app_class,
+                    window_title,
+                    cat,
+                    conf,
+                    res.get("reason", ""),
+                )
+                llm_result = WindowClassificationResult(
+                    category=cat,  # type: ignore[arg-type]
+                    classifier="llm",
+                    is_call_window=False,
+                    confidence=conf,
+                )
+                _WINDOW_LLM_CACHE[clean_pair] = llm_result
+
+                if span_id is not None and self._db_connected():
+                    await self.db.update_window_span_classification(
+                        span_id,
+                        category=cat,
+                        classifier="llm",
+                        confidence=conf,
+                        metadata_patch={
+                            "llm_reason": res.get("reason", ""),
+                            "confidence": conf,
+                        },
+                    )
+
+                if self._last_window == pair:
+                    await self.bus.publish(
+                        PlatformEvent(
+                            type="window_focus_changed",
+                            source=self.name,
+                            confidence=conf,
+                            timestamp=self._now(),
+                            payload={
+                                "app_class": app_class,
+                                "title": window_title,
+                                "window_title": window_title,
+                                "category": cat,
+                                "focus": cat,
+                                "classifier": "llm",
+                                "is_call_window": False,
+                                "calendar_event_id": None,
+                                "span_id": span_id,
+                            },
+                        )
+                    )
 
     async def _on_input_idle_changed(self, event: PlatformEvent) -> None:
         event_time = self._event_now(event)
@@ -1206,7 +1369,7 @@ class HyprlandIpcModule(BaseModule):
     async def _cancel_background_tasks(self) -> None:
         await self._cancel_idle_timer()
 
-        for attr in ("_idle_monitor_task", "_socket_task"):
+        for attr in ("_idle_monitor_task", "_socket_task", "_llm_classify_task"):
             task: asyncio.Task[None] | None = getattr(self, attr)
             setattr(self, attr, None)
             if task is not None and not task.done():

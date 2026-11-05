@@ -294,6 +294,21 @@ async def test_activity_and_window_span_persistence(tmp_path: Path) -> None:
         assert [w["app_class"] for w in windows] == ["firefox", "code"]
         assert windows[1]["ended_at"] == t1.isoformat()
 
+        # Update window span classification
+        updated = await db2.update_window_span_classification(
+            span_id=int(w1["id"]),
+            category="distracted",
+            classifier="llm",
+            confidence=0.88,
+            metadata_patch={"reason": "reclassified"},
+        )
+        assert updated is not None
+        assert updated["category"] == "distracted"
+        assert updated["classifier"] == "llm"
+        assert updated["metadata"]["reason"] == "reclassified"
+        assert updated["metadata"]["confidence"] == 0.88
+
+
 
 async def test_timer_spans_and_interrupted_cleanup(db: Database) -> None:
     t0 = datetime(2026, 11, 3, 16, 0, 0).astimezone()

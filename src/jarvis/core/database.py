@@ -689,6 +689,62 @@ class Database:
             assert result is not None
             return result
 
+    async def update_window_span_classification(
+        self,
+        span_id: int,
+        *,
+        category: str,
+        classifier: str,
+        confidence: float = 1.0,
+        metadata_patch: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """Update the category, classifier, and metadata of an existing window span."""
+        async with self._lock:
+            conn = self.connection
+            async with conn.execute(
+                "SELECT * FROM window_spans WHERE id = ?",
+                (span_id,),
+            ) as cursor:
+                row = await cursor.fetchone()
+            if row is None:
+                return None
+
+            row_dict = _row_to_dict(row) or {}
+            existing_meta: dict[str, Any] = {}
+            raw_meta = row_dict.get("metadata_json")
+            if raw_meta:
+                try:
+                    import json
+                    existing_meta = json.loads(raw_meta)
+                except Exception:
+                    pass
+
+            if metadata_patch:
+                existing_meta.update(metadata_patch)
+            existing_meta["category"] = category
+            existing_meta["classifier"] = classifier
+            existing_meta["confidence"] = confidence
+
+            import json
+            meta_str = json.dumps(existing_meta)
+
+            await conn.execute(
+                """
+                UPDATE window_spans
+                SET category = ?, classifier = ?, metadata_json = ?
+                WHERE id = ?
+                """,
+                (category, classifier, meta_str, span_id),
+            )
+            await conn.commit()
+
+            async with conn.execute(
+                "SELECT * FROM window_spans WHERE id = ?",
+                (span_id,),
+            ) as fetch_cursor:
+                updated_row = await fetch_cursor.fetchone()
+            return _row_to_dict(updated_row)
+
     async def close_current_window_span(
         self,
         ended_at: datetime | str | None = None,

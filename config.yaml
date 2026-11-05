@@ -70,24 +70,15 @@ pomodoro:
   recommendation_cooldown_minutes: 30
 
 focus:
+  rules_file: "focus_rules.yaml"  # easily customizable tier-1 rules file (thesis tools, IDEs, browser sites)
   distraction_grace_seconds: 180
   phone_unlock_limit_seconds: 60
   max_prompts_per_hour: 4
   recommendation_cooldown_minutes: 15
-  work_app_classes:
-    - "code"
-    - "Alacritty"
-    - "kitty"
-    - "obsidian"
-    - "Zotero"
-  distraction_app_classes: []
-  neutral_app_classes: []
-  distraction_title_patterns:
-    - "YouTube"
-    - "Reddit"
-    - "Twitch"
-    - "Twitter"
-    - "X"
+  enable_llm_fallback: true       # small local LLM fallback for ambiguous / unknown windows
+  llm_model: "qwen3:14b"
+  llm_min_dwell_seconds: 3.0
+  llm_timeout_seconds: 10.0
 
 google_calendar:
   calendar_id: "primary"
