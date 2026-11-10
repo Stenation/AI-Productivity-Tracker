@@ -27,6 +27,7 @@ class ManualControlModule(BaseModule):
     def __init__(self, bus: EventBus, db: Database, config: dict[str, Any]) -> None:
         super().__init__(bus=bus, db=db, config=config)
         self._last_effective_activity: ActivityState = "unknown"
+        self._last_non_away_activity: ManualActivityState = "sitting"
         self._last_event_at: datetime | None = None
         self._running: bool = False
 
@@ -39,6 +40,15 @@ class ManualControlModule(BaseModule):
                 raw_act = str(current_span.get("activity", "unknown"))
                 if raw_act in (*MANUAL_ACTIVITY_CYCLE, "unknown"):
                     self._last_effective_activity = cast(ActivityState, raw_act)
+                    if raw_act in ("sitting", "standing", "walking"):
+                        self._last_non_away_activity = cast(ManualActivityState, raw_act)
+            if self._last_non_away_activity == "sitting":
+                recent = await self.db.list_activity_spans(limit=10)
+                for s in recent:
+                    act = str(s.get("activity", ""))
+                    if act in ("sitting", "standing", "walking"):
+                        self._last_non_away_activity = cast(ManualActivityState, act)
+                        break
         self._running = True
 
     async def stop(self) -> None:
@@ -132,6 +142,30 @@ class ManualControlModule(BaseModule):
         next_activity = self.next_activity_in_cycle(effective_current)
         return await self.set_activity(next_activity, ttl_minutes=ttl_minutes)
 
+    async def toggle_away(
+        self,
+        current_activity: ActivityState | str | None = None,
+        ttl_minutes: int | float | None = None,
+    ) -> PlatformEvent:
+        """Toggle between 'away' and the last non-away state (sitting/standing/walking)."""
+        effective_current = current_activity
+        if effective_current is None:
+            if getattr(self.db, "_conn", None) is not None:
+                current_span = await self.db.get_current_activity_span()
+                if current_span is not None:
+                    effective_current = str(current_span.get("activity", "unknown"))
+            if effective_current is None:
+                effective_current = self._last_effective_activity
+
+        if effective_current == "away":
+            next_activity = self._last_non_away_activity
+        else:
+            if effective_current in ("sitting", "standing", "walking"):
+                self._last_non_away_activity = cast(ManualActivityState, effective_current)
+            next_activity = "away"
+
+        return await self.set_activity(next_activity, ttl_minutes=ttl_minutes)
+
     def _on_activity_state_changed(self, event: PlatformEvent) -> None:
         raw_activity = event.payload.get("activity")
         if isinstance(raw_activity, str) and raw_activity in (
@@ -139,6 +173,8 @@ class ManualControlModule(BaseModule):
             "unknown",
         ):
             self._last_effective_activity = cast(ActivityState, raw_activity)
+            if raw_activity in ("sitting", "standing", "walking"):
+                self._last_non_away_activity = cast(ManualActivityState, raw_activity)
 
     @staticmethod
     def _normalize_ttl(value: int | float | str) -> int | float:

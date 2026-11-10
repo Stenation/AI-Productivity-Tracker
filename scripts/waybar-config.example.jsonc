@@ -12,6 +12,6 @@
     "tooltip": true,
     "on-click": "curl -fsS -X POST http://127.0.0.1:8000/api/activity/cycle >/dev/null",
     "on-click-right": "xdg-open http://127.0.0.1:8000",
-    "on-click-middle": "curl -fsS -X POST http://127.0.0.1:8000/api/recommendations/snooze >/dev/null"
+    "on-click-middle": "curl -fsS -X POST http://127.0.0.1:8000/api/activity/toggle-away >/dev/null"
   }
 }

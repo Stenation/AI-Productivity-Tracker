@@ -194,6 +194,59 @@ async def test_api_accidental_cycle_under_30s_resumes_sitting_session(
     assert hist["spans"][0]["ended_at"] is None
 
 
+async def test_api_toggle_away_and_restore_previous_state(
+    api_env: tuple[FastAPI, httpx.AsyncClient],
+) -> None:
+    _, client = api_env
+
+    # 1. Start in sitting
+    set_resp = await client.post("/api/activity", json={"activity": "sitting"})
+    assert set_resp.status_code == 200
+
+    # 2. Toggle away (middle click simulation): sitting -> away
+    t1 = await client.post("/api/activity/toggle-away")
+    assert t1.status_code == 200
+    d1 = t1.json()
+    assert d1["status"] == "ok"
+    assert d1["previous_activity"] == "sitting"
+    assert d1["activity"] == "away"
+
+    # 3. Toggle again: away -> sitting
+    t2 = await client.post("/api/activity/toggle-away")
+    assert t2.status_code == 200
+    d2 = t2.json()
+    assert d2["status"] == "ok"
+    assert d2["previous_activity"] == "away"
+    assert d2["activity"] == "sitting"
+
+    # 4. Switch to standing
+    set_stand = await client.post("/api/activity", json={"activity": "standing"})
+    assert set_stand.status_code == 200
+
+    # 5. Toggle away from standing: standing -> away
+    t3 = await client.post("/api/activity/toggle-away")
+    assert t3.status_code == 200
+    d3 = t3.json()
+    assert d3["previous_activity"] == "standing"
+    assert d3["activity"] == "away"
+
+    # 6. Toggle again via alias endpoint /api/activity/toggle: away -> standing
+    t4 = await client.post("/api/activity/toggle")
+    assert t4.status_code == 200
+    d4 = t4.json()
+    assert d4["previous_activity"] == "away"
+    assert d4["activity"] == "standing"
+
+    # 7. HTMX invocation returns posture partial HTML
+    htmx_resp = await client.post(
+        "/api/activity/toggle-away",
+        headers={"HX-Request": "true"},
+    )
+    assert htmx_resp.status_code == 200
+    assert htmx_resp.headers.get("HX-Trigger") == "activityChanged"
+    assert "text/html" in htmx_resp.headers["content-type"]
+
+
 async def test_timer_manager_work_break_completed_transitions(
     db: Database,
 ) -> None:

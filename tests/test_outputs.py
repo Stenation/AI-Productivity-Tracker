@@ -569,7 +569,7 @@ async def test_posture_status_script_online_offline_and_static_configs(
     assert custom_posture["signal"] == 8
     assert "http://127.0.0.1:8000/api/activity/cycle" in custom_posture["on-click"]
     assert "http://127.0.0.1:8000" in custom_posture["on-click-right"]
-    assert "http://127.0.0.1:8000/api/recommendations/snooze" in custom_posture["on-click-middle"]
+    assert "http://127.0.0.1:8000/api/activity/toggle-away" in custom_posture["on-click-middle"]
 
     # 5. Validate systemd/posture-core.service directives
     unit_text = service_unit.read_text(encoding="utf-8")

@@ -79,6 +79,14 @@ class CycleActivityRequest(BaseModel):
     ttl_minutes: int | float | None = Field(default=None, gt=0)
 
 
+class ToggleAwayRequest(BaseModel):
+    """Optional payload for `POST /api/activity/toggle-away`."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    ttl_minutes: int | float | None = Field(default=None, gt=0)
+
+
 class RecommendationResolutionRequest(BaseModel):
     """Optional payload for recommendation accept/snooze/dismiss endpoints."""
 
@@ -202,6 +210,10 @@ _SetActivityDep = Annotated[
 _CycleActivityDep = Annotated[
     CycleActivityRequest,
     Depends(_parse_json_or_form(CycleActivityRequest, allow_empty=True)),
+]
+_ToggleAwayDep = Annotated[
+    ToggleAwayRequest,
+    Depends(_parse_json_or_form(ToggleAwayRequest, allow_empty=True)),
 ]
 _EventBodyDep = Annotated[
     PlatformEvent,
@@ -628,6 +640,49 @@ async def cycle_activity(
 
     previous_activity = resolver.get_effective_state().activity
     await manual_control.cycle_activity(
+        current_activity=previous_activity,
+        ttl_minutes=payload.ttl_minutes,
+    )
+    if is_htmx_request(request):
+        context = await build_posture_context(request)
+        return render_template(
+            request,
+            "_partials/posture_card.html",
+            context,
+            headers={"HX-Trigger": "activityChanged"},
+        )
+
+    effective = resolver.get_effective_state()
+    return {
+        "status": "ok",
+        "previous_activity": previous_activity,
+        "activity": effective.activity,
+        "source": effective.source,
+        "confidence": effective.confidence,
+        "reason": effective.reason,
+        "started_at": effective.started_at.isoformat(),
+        "elapsed_seconds": effective.elapsed_seconds,
+        "override_expires_at": (
+            effective.override_expires_at.isoformat()
+            if effective.override_expires_at is not None
+            else None
+        ),
+        "privacy_paused": effective.privacy_paused,
+    }
+
+
+@router.post("/activity/toggle-away", response_model=None)
+@router.post("/activity/toggle", response_model=None)
+async def toggle_away_activity(
+    request: Request,
+    payload: _ToggleAwayDep,
+) -> HTMLResponse | dict[str, Any]:
+    """Toggle between 'away' and the last non-away activity state."""
+    manual_control = _get_manual_control(request)
+    resolver = _get_resolver(request)
+
+    previous_activity = resolver.get_effective_state().activity
+    await manual_control.toggle_away(
         current_activity=previous_activity,
         ttl_minutes=payload.ttl_minutes,
     )
